@@ -1,0 +1,50 @@
+{
+  "event_id": "evt_000001",
+  "card_token": "card_123",
+  "amount": 2500.0,
+  "amount_limit": 1000.0,
+  "available_credit": 3000.0,
+  "fee": 5.0,
+  "tax": 10.0,
+  "account_age_days": 2,
+  "hour_of_day": 1.5,
+  "country_code": "US",
+  "billing_country": "US",
+  "shipping_country": "US",
+  "ip_country": "CA",
+  "device_type": "emulator",
+  "merchant_id": "merchant_123",
+  "merchant_bin": 411111,
+  "ip_address": "10.1.2.3",
+  "event_ts_ms": 1767225600000,
+  "description": "card payment approved",
+  "user_agent": "Mozilla/5.0",
+  "device_fingerprint": "fp-abc-123",
+  "optional_note": null,
+  "tags": ["vip", "trusted"],
+  "signal_flags": 3,
+  "billing_lat": 40.7128,
+  "billing_lon": -74.006,
+  "shipping_lat": 40.7357,
+  "shipping_lon": -74.1724,
+  "embedding_0": 0.1,
+  "embedding_1": 0.2,
+  "embedding_2": 0.3,
+  "merchant": {
+    "risk": {
+      "score": 91.0
+    }
+  },
+  "items": [
+    {
+      "sku": "sku_electronics_1",
+      "price": 150.0,
+      "category": "electronics"
+    },
+    {
+      "sku": "sku_books_1",
+      "price": 25.0,
+      "category": "books"
+    }
+  ]
+}

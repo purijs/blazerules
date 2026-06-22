@@ -1,0 +1,31 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-blazerules-config
+  labels:
+    app.kubernetes.io/name: blazerules
+    app.kubernetes.io/instance: {{ .Release.Name }}
+data:
+  rules.yaml: |
+{{ .Values.rules.inline | indent 4 }}
+  agent.yaml: |
+    instances:
+      - name: node-agent
+        rules: {{ .Values.agent.rulesPath | quote }}
+        batch_size: {{ .Values.agent.batchSize }}
+        flush_ms: {{ .Values.agent.flushMs }}
+        source: kubernetes
+        service: blazerules-agent
+        input:
+          type: {{ .Values.agent.input.type | quote }}
+          path: {{ .Values.agent.input.path | quote }}
+        output:
+          type: {{ .Values.agent.output.type | quote }}
+          path: {{ .Values.agent.output.path | quote }}
+        dedupe:
+          enabled: {{ .Values.agent.dedupe.enabled }}
+          ttl_seconds: {{ .Values.agent.dedupe.ttlSeconds }}
+          key_fields:
+{{- range .Values.agent.dedupe.keyFields }}
+            - {{ . | quote }}
+{{- end }}

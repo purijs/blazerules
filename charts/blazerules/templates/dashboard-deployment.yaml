@@ -1,0 +1,55 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}-blazerules-dashboard
+  labels:
+    app.kubernetes.io/name: blazerules-dashboard
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: blazerules-dashboard
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: blazerules-dashboard
+        app.kubernetes.io/instance: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}-blazerules
+      containers:
+        - name: dashboard
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command: ["/usr/local/bin/blazerules_dashboard"]
+          args:
+            - "--host"
+            - {{ .Values.dashboard.host | quote }}
+            - "--port"
+            - {{ .Values.dashboard.port | quote }}
+            - "--decision-log"
+            - {{ .Values.dashboard.decisionLogPath | quote }}
+            - "--dead-letter-log"
+            - {{ .Values.dashboard.deadLetterLogPath | quote }}
+            - "--rules"
+            - "/etc/blazerules/rules.yaml"
+          ports:
+            - name: http
+              containerPort: {{ .Values.dashboard.port }}
+          resources:
+{{ toYaml .Values.dashboard.resources | indent 12 }}
+          volumeMounts:
+            - name: config
+              mountPath: /etc/blazerules
+              readOnly: true
+            - name: logs
+              mountPath: /var/log/blazerules
+      volumes:
+        - name: config
+          configMap:
+            name: {{ .Release.Name }}-blazerules-config
+        - name: logs
+          emptyDir: {}
+{{- end }}

@@ -1,0 +1,6 @@
+apiVersion: v2
+name: blazerules
+description: BlazeRules local agent and dashboard deployment chart
+type: application
+version: 0.1.0
+appVersion: "0.1.0"

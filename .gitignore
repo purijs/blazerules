@@ -1,50 +1,39 @@
-# Prerequisites
 *.d
 
-# Compiled Object files
 *.slo
 *.lo
 *.o
 *.obj
 
-# Precompiled Headers
 *.gch
 *.pch
 
-# Linker files
 *.ilk
 
-# Debugger Files
 *.pdb
 
-# Compiled Dynamic libraries
 *.so
 *.dylib
 *.dll
 *.so.*
 
-
-# Fortran module files
 *.mod
 *.smod
 
-# Compiled Static libraries
 *.lai
 *.la
 *.a
 *.lib
 
-# Executables
 *.exe
 *.out
 *.app
 
-# Build directories
 build/
 Build/
 build-*/
+cmake-build-*/
 
-# CMake generated files
 CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
@@ -52,21 +41,54 @@ Makefile
 install_manifest.txt
 compile_commands.json
 
-# Temporary files
 *.tmp
 *.log
 *.bak
 *.swp
 
-# vcpkg
 vcpkg_installed/
 
-# debug information files
 *.dwo
 
-# test output & cache
 Testing/
 .cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
 
-rules.yaml
-vde.md
+.venv/
+.venv*/
+venv/
+env/
+
+.idea/
+.vscode/
+
+results/
+kafka_stress_artifacts/
+rules_*.yaml
+sample_*.json
+!sample_transaction.json
+*.jsonl
+*.ndjson
+*.parquet
+*.avro
+*.pb
+*.desc
+
+models/
+lookups/
+*.onnx
+
+documentation/
+scripts/docs/
+.github/workflows/readme-docs-sync.yml
+readme_guide.md
+
+# Product/planning source docs kept local.
+blazerules.md
+vde_extract/
+MARKET_STRATEGY.md
+docs-implementation-audit.md

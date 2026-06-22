@@ -1,0 +1,63 @@
+image:
+  repository: blazerules
+  tag: latest
+  pullPolicy: IfNotPresent
+
+agent:
+  enabled: true
+  mode: daemonset
+  rulesPath: /etc/blazerules/rules.yaml
+  batchSize: 2048
+  flushMs: 1000
+  input:
+    type: file_tail
+    path: /var/log/containers/blazerules.log
+  output:
+    type: ndjson
+    path: /var/log/blazerules/decisions.ndjson
+  dedupe:
+    enabled: false
+    ttlSeconds: 86400
+    keyFields: []
+  resources:
+    requests:
+      cpu: "500m"
+      memory: "512Mi"
+    limits:
+      cpu: "4"
+      memory: "4Gi"
+
+rules:
+  inline: |
+    rules:
+      - id: example_error_log
+        name: example_error_log
+        action: REVIEW
+        enabled: true
+        conditions:
+          field: message
+          op: contains
+          value: error
+
+dashboard:
+  enabled: true
+  port: 9470
+  host: 0.0.0.0
+  service:
+    type: ClusterIP
+  decisionLogPath: /var/log/blazerules/decisions.ndjson
+  deadLetterLogPath: /var/log/blazerules/dead_letters.ndjson
+  metricsUrl: ""
+  resultsJsonl: ""
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "1"
+      memory: "512Mi"
+
+persistence:
+  enabled: false
+  storageClass: ""
+  size: 10Gi

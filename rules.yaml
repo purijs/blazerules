@@ -1,0 +1,295 @@
+schema_version: "2.1"
+
+instances:
+  - name: payments-http
+    rules: rules.yaml
+    batch_size: 4096
+    flush_ms: 50
+    service: payments-api
+    source: http-json
+    input:
+      type: http
+      host: 127.0.0.1
+      port: 9480
+    output:
+      type: ndjson
+      path: decisions-payments.ndjson
+    dedupe:
+      enabled: true
+      key_fields: [event_id]
+      ttl_seconds: 86400
+  - name: checkout-log-tail
+    rules: rules.yaml
+    batch_size: 2048
+    flush_ms: 250
+    service: checkout
+    source: pod-stdout
+    input:
+      type: file_tail
+      path: app.log
+    output:
+      type: stdout
+    dedupe:
+      enabled: true
+      key_fields: [event_id]
+      ttl_seconds: 3600
+
+fields:
+  event_id: {type: string, nullable: false}
+  card_token: {type: entity_key, nullable: false}
+  amount: {type: float32, nullable: false}
+  amount_limit: {type: float32}
+  available_credit: {type: float32}
+  fee: {type: float32}
+  tax: {type: float32}
+  account_age_days: {type: int32}
+  hour_of_day: {type: float32}
+  country_code:
+    type: categorical
+    values: [US, GB, IN, DE, BR, CN, RU]
+  billing_country: {type: categorical}
+  shipping_country: {type: categorical}
+  ip_country: {type: categorical}
+  device_type:
+    type: categorical
+    values: [ios, android, web, emulator]
+  merchant_id: {type: categorical}
+  merchant_bin: {type: int64}
+  ip_address: {type: string}
+  event_ts_ms: {type: timestamp_ms}
+  description: {type: string}
+  user_agent: {type: string}
+  device_fingerprint: {type: string}
+  optional_note: {type: string, nullable: true}
+  tags: {type: categorical, values: [vip, chargeback, risky, trusted]}
+  signal_flags: {type: int64}
+  billing_lat: {type: float64}
+  billing_lon: {type: float64}
+  shipping_lat: {type: float64}
+  shipping_lon: {type: float64}
+  embedding_0: {type: float32}
+  embedding_1: {type: float32}
+  embedding_2: {type: float32}
+  merchant.risk.score: {type: float32}
+
+lookups:
+  blocked_merchants:
+    type: string_set
+    path: sample_lookups/blocked_merchants.csv
+  blocked_countries:
+    type: string_set
+    path: sample_lookups/blocked_countries.csv
+  risky_bins:
+    type: int_set
+    path: sample_lookups/risky_bins.csv
+  vpn_ranges:
+    type: ipv4_cidr_set
+    path: sample_lookups/vpn_ranges.csv
+
+decisions:
+  default: approve
+  precedence: [approve, flag, review, block]
+
+ruleset:
+  name: BlazeRules Complete Sample
+  version: "1.0.0"
+  rules:
+    - id: high_amount_foreign_or_rooted
+      action: review
+      severity: HIGH
+      weight: 25
+      conditions:
+        and:
+          - {field: amount, op: gt, value: 1000}
+          - or:
+              - {field: country_code, op: not_in, values: [US, GB]}
+              - {field: device_type, op: eq, value: emulator}
+
+    - id: numeric_range_and_equality
+      action: flag
+      severity: LOW
+      weight: 5
+      conditions:
+        and:
+          - {field: amount, op: lt, value: 10000}
+          - {field: account_age_days, op: gte, value: 0}
+          - {field: account_age_days, op: lte, value: 3650}
+          - {field: merchant_bin, op: eq, value: 411111}
+          - {field: amount, op: neq, value: 13}
+          - {field: hour_of_day, op: between_including, value: [0, 23]}
+          - {field: amount, op: between_excluding, value: [1, 99999]}
+
+    - id: cross_field_compare
+      action: review
+      severity: MEDIUM
+      weight: 12
+      conditions:
+        and:
+          - {field: amount, op: gt_field, other_field: amount_limit}
+          - {field: amount, op: gte_field, other_field: fee}
+          - {field: fee, op: lt_field, other_field: amount}
+          - {field: fee, op: lte_field, other_field: tax}
+          - {field: billing_country, op: eq_field, other_field: shipping_country}
+          - {field: billing_country, op: neq_field, other_field: ip_country}
+
+    - id: categorical_null_empty_and_text
+      action: flag
+      severity: MEDIUM
+      weight: 10
+      conditions:
+        and:
+          - {field: country_code, op: in, values: [US, GB, IN]}
+          - {field: device_type, op: not_in, values: [bot]}
+          - {field: optional_note, op: is_null}
+          - {field: description, op: is_not_null}
+          - {field: optional_note, op: is_empty}
+          - {field: description, op: is_not_empty}
+          - {field: description, op: contains, value: payment}
+          - {field: description, op: starts_with, value: card}
+          - {field: description, op: ends_with, value: approved}
+          - {field: user_agent, op: ci_eq, value: "Mozilla/5.0"}
+          - {field: description, op: length_gt, value: 5}
+          - {field: description, op: length_lt, value: 200}
+          - {field: device_fingerprint, op: length_eq, value: 10}
+          - {field: description, op: regex, value: "card.*payment"}
+          - {field: user_agent, op: not_regex, value: "bot|crawler"}
+
+    - id: arrays_flags_network_time_geo
+      action: block
+      severity: HIGH
+      weight: 40
+      conditions:
+        and:
+          - {field: tags, op: contains_any, values: [vip, risky]}
+          - {field: tags, op: contains_all, values: [vip, trusted]}
+          - {field: tags, op: intersects, values: [trusted, risky]}
+          - {field: tags, op: not_intersects, values: [chargeback]}
+          - {field: tags, op: array_len_gt, value: 0}
+          - {field: tags, op: array_len_lt, value: 10}
+          - {field: tags, op: array_len_eq, value: 2}
+          - {field: signal_flags, op: flags_any, mask: 1}
+          - {field: signal_flags, op: flags_all, mask: 3}
+          - {field: signal_flags, op: flags_none, mask: 8}
+          - {field: ip_address, op: ip_in_subnet, value: "10.0.0.0/8"}
+          - {field: ip_address, op: ip_not_in_subnet, value: "192.168.0.0/16"}
+          - {field: event_ts_ms, op: before, value: 4102444800000}
+          - {field: event_ts_ms, op: after, value: 1704067200000}
+          - {field: event_ts_ms, op: within_last, value: 315360000}
+          - {field: event_ts_ms, op: day_of_week_in, values: [1, 2, 3, 4, 5, 6, 7]}
+          - {field: event_ts_ms, op: time_of_day_between, value: [0, 23]}
+          - op: distance_gt
+            lat_field: billing_lat
+            lon_field: billing_lon
+            other_lat_field: shipping_lat
+            other_lon_field: shipping_lon
+            value: 10
+          - op: distance_lt
+            lat_field: billing_lat
+            lon_field: billing_lon
+            other_lat_field: shipping_lat
+            other_lon_field: shipping_lon
+            value: 5000
+
+    - id: lookup_window_and_arithmetic
+      action: review
+      severity: HIGH
+      weight: 35
+      conditions:
+        and:
+          - {field: merchant_id, op: in_lookup, lookup: blocked_merchants}
+          - {field: country_code, op: not_in_lookup, lookup: blocked_countries}
+          - {field: merchant_bin, op: in_lookup, lookup: risky_bins}
+          - {field: ip_address, op: in_lookup, lookup: vpn_ranges}
+          - window:
+              entity_field: card_token
+              function: count
+              duration_seconds: 3600
+              op: gt
+              value: 3
+          - window:
+              entity_field: card_token
+              function: sum
+              sum_field: amount
+              duration_seconds: 3600
+              op: gt
+              value: 1000
+          - window:
+              entity_field: card_token
+              function: avg
+              sum_field: amount
+              duration_seconds: 3600
+              op: gt
+              value: 100
+          - window:
+              entity_field: card_token
+              function: ratio
+              numerator_field: amount
+              denominator_field: available_credit
+              duration_seconds: 3600
+              op: gt
+              value: 0.5
+          - window:
+              entity_field: card_token
+              function: min
+              value_field: amount
+              duration_seconds: 3600
+              op: lt
+              value: 10
+          - window:
+              entity_field: card_token
+              function: max
+              value_field: amount
+              duration_seconds: 3600
+              op: gt
+              value: 10000
+          - op: gt
+            expr:
+              op: div
+              left: amount
+              right: available_credit
+            value: 0.8
+          - op: gt
+            expr:
+              op: div
+              left:
+                op: add
+                left: fee
+                right: tax
+              right: amount
+            value: 0.1
+          - op: gt
+            expr:
+              op: mul
+              left:
+                op: sub
+                left: amount
+                right: fee
+              right: 2
+            value: 100
+
+    - id: nested_array_vector_model_sql
+      action: block
+      severity: CRITICAL
+      weight: 60
+      conditions:
+        and:
+          - {field: merchant.risk.score, op: gt, value: 50}
+          - array_any:
+              path: items
+              where:
+                and:
+                  - {field: price, op: gt, value: 100}
+                  - {field: category, op: eq, value: electronics}
+          - vector_distance:
+              dims: [embedding_0, embedding_1, embedding_2]
+              metric: cosine
+              reference: [0.1, 0.2, 0.3]
+              op: gt
+              value: 0.8
+          - model_score:
+              model: fraud_logreg
+              features: [amount, account_age_days, merchant.risk.score]
+              op: gt
+              value: 0.7
+          - sql: "amount > 100 AND account_age_days >= 0"
+          - sql: "any_match(items, x -> x.price > 100 AND x.category = 'electronics')"

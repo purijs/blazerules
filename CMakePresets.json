@@ -1,0 +1,281 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 22,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "macos-arm64-release",
+      "displayName": "macOS arm64 Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Darwin"
+      }
+    },
+    {
+      "name": "linux-release-native",
+      "displayName": "Linux Release native CPU",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-linux-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "ON",
+        "BLAZERULES_X86_AVX2": "OFF",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-release-avx2",
+      "displayName": "Linux Release AVX2",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-linux-avx2",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-x86_64-release-dispatch",
+      "displayName": "Linux x86_64 Release runtime dispatch",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-linux-dispatch",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-x86_64-release-avx512",
+      "displayName": "Linux x86_64 Release runtime dispatch + AVX-512 opt-in",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-linux-avx512",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_X86_AVX512": "ON",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "linux-arm64-release-neon",
+      "displayName": "Linux arm64 Release NEON",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-linux-arm64",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "OFF",
+        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Linux"
+      }
+    },
+    {
+      "name": "cloud-portable-release",
+      "displayName": "Cloud portable Release runtime dispatch",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-cloud-portable",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      }
+    },
+    {
+      "name": "windows-msvc-release",
+      "displayName": "Windows MSVC Release",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-windows-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    },
+    {
+      "name": "windows-x64-release-dispatch",
+      "displayName": "Windows x64 Release runtime dispatch",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/cmake-build-windows-dispatch",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_ENABLE_ONNX": "ON",
+        "BLAZERULES_DASHBOARD": "ON",
+        "BLAZERULES_AGENT": "ON"
+      },
+      "condition": {
+        "type": "equals",
+        "lhs": "${hostSystemName}",
+        "rhs": "Windows"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "macos-arm64-release",
+      "configurePreset": "macos-arm64-release",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "linux-release-native",
+      "configurePreset": "linux-release-native",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "linux-release-avx2",
+      "configurePreset": "linux-release-avx2",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "windows-msvc-release",
+      "configurePreset": "windows-msvc-release",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "linux-x86_64-release-dispatch",
+      "configurePreset": "linux-x86_64-release-dispatch",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "linux-x86_64-release-avx512",
+      "configurePreset": "linux-x86_64-release-avx512",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "linux-arm64-release-neon",
+      "configurePreset": "linux-arm64-release-neon",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "cloud-portable-release",
+      "configurePreset": "cloud-portable-release",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    },
+    {
+      "name": "windows-x64-release-dispatch",
+      "configurePreset": "windows-x64-release-dispatch",
+      "targets": [
+        "blazerules_core",
+        "blazerules",
+        "blazerules_driver",
+        "blazerules_dashboard",
+        "blazerules_agent"
+      ]
+    }
+  ]
+}

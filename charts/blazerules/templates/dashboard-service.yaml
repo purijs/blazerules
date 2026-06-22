@@ -1,0 +1,18 @@
+{{- if .Values.dashboard.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Release.Name }}-blazerules-dashboard
+  labels:
+    app.kubernetes.io/name: blazerules-dashboard
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  type: {{ .Values.dashboard.service.type }}
+  selector:
+    app.kubernetes.io/name: blazerules-dashboard
+    app.kubernetes.io/instance: {{ .Release.Name }}
+  ports:
+    - name: http
+      port: {{ .Values.dashboard.port }}
+      targetPort: http
+{{- end }}
