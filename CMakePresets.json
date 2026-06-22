@@ -31,7 +31,7 @@
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "BLAZERULES_NATIVE_TUNE": "ON",
-        "BLAZERULES_X86_AVX2": "OFF",
+        "BLAZERULES_X86_AVX2": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
         "BLAZERULES_AGENT": "ON"
@@ -49,7 +49,7 @@
       "binaryDir": "${sourceDir}/cmake-build-linux-avx2",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
         "BLAZERULES_X86_AVX2": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
@@ -68,9 +68,9 @@
       "binaryDir": "${sourceDir}/cmake-build-linux-dispatch",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
         "BLAZERULES_X86_AVX2": "ON",
-        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_X86_AVX512": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
         "BLAZERULES_AGENT": "ON"
@@ -88,7 +88,7 @@
       "binaryDir": "${sourceDir}/cmake-build-linux-avx512",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
         "BLAZERULES_X86_AVX2": "ON",
         "BLAZERULES_X86_AVX512": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
@@ -108,9 +108,9 @@
       "binaryDir": "${sourceDir}/cmake-build-linux-arm64",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
-        "BLAZERULES_X86_AVX2": "OFF",
-        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
+        "BLAZERULES_X86_AVX2": "ON",
+        "BLAZERULES_X86_AVX512": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
         "BLAZERULES_AGENT": "ON"
@@ -128,9 +128,9 @@
       "binaryDir": "${sourceDir}/cmake-build-cloud-portable",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
         "BLAZERULES_X86_AVX2": "ON",
-        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_X86_AVX512": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
         "BLAZERULES_AGENT": "ON"
@@ -143,9 +143,9 @@
       "binaryDir": "${sourceDir}/cmake-build-windows-release",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
         "BLAZERULES_X86_AVX2": "ON",
-        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_X86_AVX512": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
         "BLAZERULES_AGENT": "ON"
@@ -163,9 +163,9 @@
       "binaryDir": "${sourceDir}/cmake-build-windows-dispatch",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "BLAZERULES_NATIVE_TUNE": "OFF",
+        "BLAZERULES_NATIVE_TUNE": "ON",
         "BLAZERULES_X86_AVX2": "ON",
-        "BLAZERULES_X86_AVX512": "OFF",
+        "BLAZERULES_X86_AVX512": "ON",
         "BLAZERULES_ENABLE_ONNX": "ON",
         "BLAZERULES_DASHBOARD": "ON",
         "BLAZERULES_AGENT": "ON"

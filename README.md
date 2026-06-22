@@ -32,21 +32,22 @@ backtesting where deterministic rules should run before more expensive systems.
   ONNX `model_score` rules.
 - Uses runtime-dispatched SIMD kernels: ARM64 NEON, x86_64 AVX2/FMA, optional
   AVX-512, and scalar fallback.
-- Exposes optional `blazerules_io` connectors/decoders for Kafka, CDC, Arrow IPC,
+- Exposes `blazerules_io` connectors/decoders for Kafka, CDC, Arrow IPC,
   Avro, Protobuf, local files, and exact-object `s3://` reads.
-- Includes optional dashboard and agent targets, both disabled by default.
+- Includes the local read-only dashboard and the multi-input agent in full
+  release builds.
 
 ## Repository Layout
 
 ```text
 include/blazerules/      C++ public core headers
-include/blazerules_io/   Optional IO/streaming headers
+include/blazerules_io/   IO/streaming headers
 src/core/                Engine, kernels, transposer, dictionaries, windows
 src/compiler/            YAML/SQL parser, compiler, validation, conflicts
 src/bindings/            pybind11 modules
-src/io/                  Optional Kafka/file/decoder implementation
-src/dashboard/           Optional local read-only dashboard
-src/agent/               Optional local multi-input agent
+src/io/                  Kafka/file/decoder implementation
+src/dashboard/           Local read-only dashboard
+src/agent/               Local multi-input agent
 charts/                  Optional Helm chart
 rules.yaml               Complete compact rule and multi-instance sample
 sample_transaction.json  JSON record matching rules.yaml
@@ -60,23 +61,21 @@ models, and lookup data are intentionally ignored by git.
 
 ## Install From PyPI
 
-For the Python core module:
+For the full Python package:
 
 ```bash
 pip install blazerules
 ```
 
-The wheel contains the native `blazerules` C++ extension and links/bundles the
-core native dependencies needed by the rule engine. `numpy` and `pyarrow` are
-declared Python runtime dependencies and are installed by pip. The PyPI wheel is
-the portable core package: JSON/NDJSON/Arrow evaluation, schema inference,
-compiled YAML rules, decisions/scoring, windows, lookups, regex, CIDR, temporal,
-geo, vector similarity, and runtime-dispatched SIMD kernels.
+The release wheel is built full-feature: native `blazerules`, `blazerules_io`,
+ONNX `model_score`, Kafka/CDC/Arrow IPC/Avro/Protobuf/S3 IO, dashboard, agent,
+runtime-dispatched SIMD kernels, schema inference, windows, lookups, regex,
+CIDR, temporal, geo, vector similarity, and decisions/scoring. `numpy` and
+`pyarrow` are declared Python runtime dependencies and are installed by pip.
 
-The optional IO module, local dashboard executable, local agent executable, and
-ONNX Runtime model scoring are source-build features for now. Build from source
-when you need Kafka, Avro, Protobuf, dashboard, agent, or ONNX in the same
-environment.
+```bash
+python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
+```
 
 ## Build From Source
 
@@ -101,7 +100,7 @@ Smoke:
 
 ```bash
 export PYTHONPATH="$PWD/cmake-build-release"
-python -c "import blazerules; print(blazerules.__version__, blazerules.simd_backend())"
+python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
 ./cmake-build-release/blazerules_driver rules.yaml
 ```
 
@@ -126,40 +125,43 @@ cmake --build --preset windows-x64-release-dispatch -j
 | Option | Default | Purpose |
 | --- | --- | --- |
 | `BLAZERULES_ENABLE_ONNX` | `ON` | Enables `model_score` rules and `register_model()` |
-| `BLAZERULES_IO` | `OFF` | Builds `blazerules_io` connectors/decoders |
+| `BLAZERULES_IO` | `ON` | Builds `blazerules_io` connectors/decoders |
 | `BLAZERULES_IO_KAFKA` | `ON` | Kafka source/sink inside `blazerules_io` |
-| `BLAZERULES_IO_AVRO` | `OFF` | Avro binary decoder |
-| `BLAZERULES_IO_PROTOBUF` | `OFF` | Protobuf descriptor decoder |
-| `BLAZERULES_DASHBOARD` | `OFF` | Local read-only dashboard executable |
-| `BLAZERULES_AGENT` | `OFF` | Local multi-input log/HTTP/file agent |
-| `BLAZERULES_NATIVE_TUNE` | `OFF` | Local `-march=native` style tuning; not for portable builds |
+| `BLAZERULES_IO_AVRO` | `ON` | Avro binary decoder |
+| `BLAZERULES_IO_PROTOBUF` | `ON` | Protobuf descriptor decoder |
+| `BLAZERULES_DASHBOARD` | `ON` | Local read-only dashboard executable |
+| `BLAZERULES_AGENT` | `ON` | Local multi-input log/HTTP/file agent |
+| `BLAZERULES_NATIVE_TUNE` | `ON` | Local `-march=native` style tuning |
 | `BLAZERULES_X86_AVX2` | `ON` | Builds runtime-dispatched AVX2 kernels on x86_64 |
-| `BLAZERULES_X86_AVX512` | `OFF` | Builds optional AVX-512 kernels on x86_64 |
+| `BLAZERULES_X86_AVX512` | `ON` | Builds optional AVX-512 kernels on x86_64 |
 
-Portable Linux/Windows/cloud builds do not compile generic code with global AVX
-flags. ISA-specific files are compiled separately and selected at runtime.
-
-The PyPI wheel intentionally uses the portable core configuration. Source builds
-can turn optional features on as needed:
+The PyPI release workflow builds with the full feature set enabled. For a local
+source build, the defaults are also full-feature, but the flags can still be
+spelled out explicitly:
 
 ```bash
 cmake -S . -B cmake-build-release \
   -DCMAKE_BUILD_TYPE=Release \
   -DBLAZERULES_ENABLE_ONNX=ON \
   -DBLAZERULES_IO=ON \
+  -DBLAZERULES_IO_KAFKA=ON \
   -DBLAZERULES_IO_AVRO=ON \
   -DBLAZERULES_IO_PROTOBUF=ON \
+  -DBLAZERULES_IO_S3=ON \
   -DBLAZERULES_DASHBOARD=ON \
   -DBLAZERULES_AGENT=ON \
+  -DBLAZERULES_NATIVE_TUNE=ON \
+  -DBLAZERULES_X86_AVX2=ON \
+  -DBLAZERULES_X86_AVX512=ON \
   -G Ninja
 ```
 
 ## Dashboard Preview
 
-The optional dashboard is a local, read-only operational UI for rules, decision
+The dashboard is a local, read-only operational UI for rules, decision
 logs, dead-letter logs, source health, and benchmark summaries.
 
-![BlazeRules dashboard overview](assets/dashboard-overview.png)
+![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
 
 ## Python Quick Start
 
@@ -499,10 +501,11 @@ cfg.enable_avx512 = False
 AVX-512 is disabled for auto-selection unless explicitly enabled because some
 server CPUs reduce frequency under wide vectors. Measure before enabling.
 
-## Optional IO Module
+## IO Module
 
-Build with `-DBLAZERULES_IO=ON` to get `blazerules_io`. Optional decoders require
-their matching flags:
+The full wheel and default source build include `blazerules_io`. If you maintain
+a custom lean build, keep `-DBLAZERULES_IO=ON` and enable the matching decoder
+flags:
 
 ```text
 BLAZERULES_IO_AVRO=ON
@@ -550,7 +553,6 @@ export BLAZERULES_AWS_ENDPOINT_URL=http://127.0.0.1:9000
 Dashboard:
 
 ```bash
-cmake -S . -B cmake-build-release -DBLAZERULES_DASHBOARD=ON -G Ninja
 cmake --build cmake-build-release --target blazerules_dashboard -j
 ./cmake-build-release/blazerules_dashboard --host 127.0.0.1 --port 9470 --rules rules.yaml
 ```
@@ -558,7 +560,6 @@ cmake --build cmake-build-release --target blazerules_dashboard -j
 Agent:
 
 ```bash
-cmake -S . -B cmake-build-release -DBLAZERULES_AGENT=ON -G Ninja
 cmake --build cmake-build-release --target blazerules_agent -j
 ```
 

@@ -69,7 +69,7 @@ jobs:
         if: runner.os != 'Linux'
         shell: bash
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
+          git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cmd //c "%GITHUB_WORKSPACE%\\.vcpkg\\bootstrap-vcpkg.bat -disableMetrics"
           else
@@ -89,7 +89,7 @@ jobs:
             VCPKG_ROOT_PATH="${{ matrix.vcpkg-root }}"
           fi
 
-          CMAKE_RELEASE_ARGS="-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT_PATH}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON -DBLAZERULES_ENABLE_ONNX=OFF -DBLAZERULES_IO=OFF -DBLAZERULES_DASHBOARD=OFF -DBLAZERULES_AGENT=OFF -DBLAZERULES_NATIVE_TUNE=OFF -DBLAZERULES_X86_AVX512=OFF"
+          CMAKE_RELEASE_ARGS="-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT_PATH}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DBLAZERULES_ENABLE_ONNX=ON -DBLAZERULES_IO=ON -DBLAZERULES_IO_KAFKA=ON -DBLAZERULES_IO_AVRO=ON -DBLAZERULES_IO_PROTOBUF=ON -DBLAZERULES_IO_S3=ON -DBLAZERULES_DASHBOARD=ON -DBLAZERULES_AGENT=ON -DBLAZERULES_NATIVE_TUNE=ON -DBLAZERULES_X86_AVX2=ON -DBLAZERULES_X86_AVX512=ON"
 
           {
             echo "CIBW_ARCHS=${{ matrix.archs }}"
@@ -102,7 +102,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "rm -rf ${VCPKG_ROOT_PATH} && git clone --depth 1 https://github.com/microsoft/vcpkg ${VCPKG_ROOT_PATH} && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
+              echo "rm -rf ${VCPKG_ROOT_PATH} && git clone https://github.com/microsoft/vcpkg ${VCPKG_ROOT_PATH} && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi

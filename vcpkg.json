@@ -31,5 +31,5 @@
       } ]
     }
   },
-  "default-features" : [ "onnx" ]
+  "default-features" : [ "onnx", "io", "io-avro", "io-protobuf", "io-s3" ]
 }

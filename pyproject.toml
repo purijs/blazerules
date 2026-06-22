@@ -77,4 +77,4 @@ sdist.exclude = [
 build = "cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux*"
 test-requires = ["numpy", "pyarrow"]
-test-command = "python -c \"import blazerules; print(blazerules.__version__, blazerules.simd_backend())\""
+test-command = "python -c \"import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())\""

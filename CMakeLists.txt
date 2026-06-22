@@ -18,9 +18,9 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 message(STATUS "CMAKE_PREFIX_PATH=${CMAKE_PREFIX_PATH}")
 message(STATUS "CMAKE_TOOLCHAIN_FILE=${CMAKE_TOOLCHAIN_FILE}")
 
-option(BLAZERULES_NATIVE_TUNE "Tune release builds for the local CPU where safe; use OFF for distributable/cloud-portable builds" OFF)
+option(BLAZERULES_NATIVE_TUNE "Tune release builds for the local CPU where safe; use OFF for distributable/cloud-portable builds" ON)
 option(BLAZERULES_X86_AVX2 "Build AVX2/FMA runtime-dispatched kernels for x86_64" ON)
-option(BLAZERULES_X86_AVX512 "Build optional AVX-512 runtime-dispatched kernels for x86_64" OFF)
+option(BLAZERULES_X86_AVX512 "Build optional AVX-512 runtime-dispatched kernels for x86_64" ON)
 
 if(MSVC)
         add_compile_options(/W4 /permissive-)
@@ -188,11 +188,11 @@ install(TARGETS blazerules
         RUNTIME DESTINATION .
         COMPONENT python)
 
-option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" OFF)
+option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" ON)
 option(BLAZERULES_IO_KAFKA "Kafka source/sink via librdkafka (needs the io module)" ON)
-option(BLAZERULES_IO_AVRO "Avro binary decoder in blazerules_io" OFF)
-option(BLAZERULES_IO_PROTOBUF "Protobuf dynamic descriptor decoder in blazerules_io" OFF)
-option(BLAZERULES_IO_S3 "Compatibility flag; exact-object s3:// IO uses the AWS CLI cache path" OFF)
+option(BLAZERULES_IO_AVRO "Avro binary decoder in blazerules_io" ON)
+option(BLAZERULES_IO_PROTOBUF "Protobuf dynamic descriptor decoder in blazerules_io" ON)
+option(BLAZERULES_IO_S3 "Compatibility flag; exact-object s3:// IO uses the AWS CLI cache path" ON)
 if(BLAZERULES_IO)
         set(BLAZERULES_IO_SOURCES
                 src/io/cdc.cpp
@@ -247,26 +247,30 @@ if(BLAZERULES_IO)
         pybind11_add_module(blazerules_io_py MODULE src/bindings/pybind_io_module.cpp)
         set_target_properties(blazerules_io_py PROPERTIES OUTPUT_NAME blazerules_io)
         target_link_libraries(blazerules_io_py PRIVATE blazerules_io)
+        install(TARGETS blazerules_io_py
+                LIBRARY DESTINATION .
+                RUNTIME DESTINATION .
+                COMPONENT python)
         message(STATUS "BlazeRules: IO connectors ENABLED (kafka=${BLAZERULES_IO_KAFKA}, avro=${BLAZERULES_IO_AVRO}, protobuf=${BLAZERULES_IO_PROTOBUF}, s3=${BLAZERULES_IO_S3})")
 endif()
 
-option(BLAZERULES_DASHBOARD "Build the local read-only BlazeRules dashboard server" OFF)
+option(BLAZERULES_DASHBOARD "Build the local read-only BlazeRules dashboard server" ON)
 if(BLAZERULES_DASHBOARD)
         find_package(httplib CONFIG REQUIRED)
         add_executable(blazerules_dashboard src/dashboard/main.cpp)
         target_include_directories(blazerules_dashboard PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_link_libraries(blazerules_dashboard PRIVATE httplib::httplib)
-        install(TARGETS blazerules_dashboard RUNTIME DESTINATION bin)
+        install(TARGETS blazerules_dashboard RUNTIME DESTINATION bin COMPONENT python)
         message(STATUS "BlazeRules: dashboard server ENABLED")
 endif()
 
-option(BLAZERULES_AGENT "Build the BlazeRules local multi-instance ingest agent" OFF)
+option(BLAZERULES_AGENT "Build the BlazeRules local multi-instance ingest agent" ON)
 if(BLAZERULES_AGENT)
         find_package(httplib CONFIG REQUIRED)
         add_executable(blazerules_agent src/agent/main.cpp)
         target_include_directories(blazerules_agent PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
         target_link_libraries(blazerules_agent PRIVATE blazerules_core httplib::httplib)
-        install(TARGETS blazerules_agent RUNTIME DESTINATION bin)
+        install(TARGETS blazerules_agent RUNTIME DESTINATION bin COMPONENT python)
         message(STATUS "BlazeRules: agent ENABLED")
 endif()
 
