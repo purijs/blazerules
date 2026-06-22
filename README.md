@@ -58,6 +58,28 @@ models, and lookup data are intentionally ignored by git.
 
 ## Build
 
+## Install From PyPI
+
+For the Python core module:
+
+```bash
+pip install blazerules
+```
+
+The wheel contains the native `blazerules` C++ extension and links/bundles the
+core native dependencies needed by the rule engine. `numpy` and `pyarrow` are
+declared Python runtime dependencies and are installed by pip. The PyPI wheel is
+the portable core package: JSON/NDJSON/Arrow evaluation, schema inference,
+compiled YAML rules, decisions/scoring, windows, lookups, regex, CIDR, temporal,
+geo, vector similarity, and runtime-dispatched SIMD kernels.
+
+The optional IO module, local dashboard executable, local agent executable, and
+ONNX Runtime model scoring are source-build features for now. Build from source
+when you need Kafka, Avro, Protobuf, dashboard, agent, or ONNX in the same
+environment.
+
+## Build From Source
+
 macOS arm64 prerequisites:
 
 ```bash
@@ -116,6 +138,28 @@ cmake --build --preset windows-x64-release-dispatch -j
 
 Portable Linux/Windows/cloud builds do not compile generic code with global AVX
 flags. ISA-specific files are compiled separately and selected at runtime.
+
+The PyPI wheel intentionally uses the portable core configuration. Source builds
+can turn optional features on as needed:
+
+```bash
+cmake -S . -B cmake-build-release \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DBLAZERULES_ENABLE_ONNX=ON \
+  -DBLAZERULES_IO=ON \
+  -DBLAZERULES_IO_AVRO=ON \
+  -DBLAZERULES_IO_PROTOBUF=ON \
+  -DBLAZERULES_DASHBOARD=ON \
+  -DBLAZERULES_AGENT=ON \
+  -G Ninja
+```
+
+## Dashboard Preview
+
+The optional dashboard is a local, read-only operational UI for rules, decision
+logs, dead-letter logs, source health, and benchmark summaries.
+
+![BlazeRules dashboard overview](assets/dashboard-overview.png)
 
 ## Python Quick Start
 

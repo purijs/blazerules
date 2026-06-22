@@ -2,7 +2,7 @@
   "name" : "blazerules",
   "version" : "0.1.0",
   "builtin-baseline" : "eb35a05cc21c69ec1399f7532b7dd61d271ac0d1",
-  "dependencies" : [ "arrow", "abseil", "tbb", "yaml-cpp", "pybind11", "re2", "cpp-httplib", {
+  "dependencies" : [ "arrow", "abseil", "tbb", "yaml-cpp", "re2", "cpp-httplib", {
     "name" : "simdjson",
     "version>=" : "4.6.4"
   } ],

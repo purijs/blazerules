@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="900" viewBox="0 0 1440 900">
+  <rect width="1440" height="900" fill="#f6f7f9"/>
+  <rect x="0" y="0" width="1440" height="56" fill="#171923"/>
+  <text x="24" y="36" font-family="Inter, Arial, sans-serif" font-size="20" font-weight="700" fill="#ffffff">BlazeRules Dashboard</text>
+  <text x="1220" y="35" font-family="Inter, Arial, sans-serif" font-size="13" fill="#aeb4c0">ruleset: fraud-v1.0.0</text>
+  <rect x="0" y="56" width="210" height="844" fill="#20232e"/>
+  <text x="24" y="98" font-family="Inter, Arial, sans-serif" font-size="12" font-weight="700" fill="#8e96a8">OVERVIEW</text>
+  <text x="24" y="134" font-family="Inter, Arial, sans-serif" font-size="15" fill="#ffffff">Live Summary</text>
+  <text x="24" y="170" font-family="Inter, Arial, sans-serif" font-size="15" fill="#b9c0ce">Decisions</text>
+  <text x="24" y="206" font-family="Inter, Arial, sans-serif" font-size="15" fill="#b9c0ce">Rules</text>
+  <text x="24" y="242" font-family="Inter, Arial, sans-serif" font-size="15" fill="#b9c0ce">Errors / DLQ</text>
+  <text x="24" y="278" font-family="Inter, Arial, sans-serif" font-size="15" fill="#b9c0ce">Benchmarks</text>
+  <text x="24" y="314" font-family="Inter, Arial, sans-serif" font-size="15" fill="#b9c0ce">System</text>
+
+  <text x="238" y="96" font-family="Inter, Arial, sans-serif" font-size="26" font-weight="700" fill="#20242c">Live Overview</text>
+  <text x="238" y="122" font-family="Inter, Arial, sans-serif" font-size="13" fill="#667085">Read-only metrics, decisions, rule fire rates, benchmark results, and source health.</text>
+
+  <g font-family="Inter, Arial, sans-serif">
+    <rect x="238" y="152" width="180" height="98" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+    <text x="256" y="183" font-size="12" font-weight="700" fill="#667085">RECORDS / SEC</text>
+    <text x="256" y="222" font-size="30" font-weight="700" fill="#111827">842k</text>
+    <text x="256" y="240" font-size="12" fill="#12a150">+12.4% last 5m</text>
+    <rect x="438" y="152" width="180" height="98" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+    <text x="456" y="183" font-size="12" font-weight="700" fill="#667085">MATCH RATE</text>
+    <text x="456" y="222" font-size="30" font-weight="700" fill="#111827">37.8%</text>
+    <text x="456" y="240" font-size="12" fill="#667085">2.1M matched</text>
+    <rect x="638" y="152" width="180" height="98" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+    <text x="656" y="183" font-size="12" font-weight="700" fill="#667085">P95 LATENCY</text>
+    <text x="656" y="222" font-size="30" font-weight="700" fill="#111827">7.4ms</text>
+    <text x="656" y="240" font-size="12" fill="#667085">batch total</text>
+    <rect x="838" y="152" width="180" height="98" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+    <text x="856" y="183" font-size="12" font-weight="700" fill="#667085">SKIPPED ROWS</text>
+    <text x="856" y="222" font-size="30" font-weight="700" fill="#111827">19</text>
+    <text x="856" y="240" font-size="12" fill="#b42318">3 malformed</text>
+    <rect x="1038" y="152" width="180" height="98" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+    <text x="1056" y="183" font-size="12" font-weight="700" fill="#667085">SIMD BACKEND</text>
+    <text x="1056" y="222" font-size="30" font-weight="700" fill="#111827">AVX2</text>
+    <text x="1056" y="240" font-size="12" fill="#667085">runtime selected</text>
+  </g>
+
+  <rect x="238" y="280" width="620" height="260" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+  <text x="258" y="316" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#111827">Decision Timeline</text>
+  <line x1="258" y1="490" x2="830" y2="490" stroke="#e5e7eb"/>
+  <line x1="258" y1="440" x2="830" y2="440" stroke="#eef0f4"/>
+  <line x1="258" y1="390" x2="830" y2="390" stroke="#eef0f4"/>
+  <line x1="258" y1="340" x2="830" y2="340" stroke="#eef0f4"/>
+  <g fill="#87b7d8">
+    <rect x="274" y="356" width="12" height="134"/><rect x="302" y="348" width="12" height="142"/><rect x="330" y="364" width="12" height="126"/>
+    <rect x="358" y="342" width="12" height="148"/><rect x="386" y="352" width="12" height="138"/><rect x="414" y="336" width="12" height="154"/>
+    <rect x="442" y="360" width="12" height="130"/><rect x="470" y="350" width="12" height="140"/><rect x="498" y="344" width="12" height="146"/>
+    <rect x="526" y="356" width="12" height="134"/><rect x="554" y="362" width="12" height="128"/><rect x="582" y="346" width="12" height="144"/>
+    <rect x="610" y="354" width="12" height="136"/><rect x="638" y="340" width="12" height="150"/><rect x="666" y="358" width="12" height="132"/>
+    <rect x="694" y="350" width="12" height="140"/><rect x="722" y="366" width="12" height="124"/><rect x="750" y="344" width="12" height="146"/>
+  </g>
+  <polyline points="274,370 314,365 354,386 394,352 434,376 474,362 514,358 554,382 594,365 634,354 674,373 714,360 754,355" fill="none" stroke="#dc4c64" stroke-width="3"/>
+
+  <rect x="880" y="280" width="520" height="260" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+  <text x="900" y="316" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#111827">Top Fired Rules</text>
+  <g font-family="Inter, Arial, sans-serif" font-size="13">
+    <text x="900" y="352" fill="#667085">RULE</text><text x="1284" y="352" fill="#667085">FIRES</text>
+    <line x1="900" y1="366" x2="1378" y2="366" stroke="#e5e7eb"/>
+    <text x="900" y="394" fill="#111827">high_amount_foreign</text><text x="1284" y="394" fill="#111827">482k</text><rect x="1180" y="382" width="86" height="10" fill="#5b9bd5"/>
+    <text x="900" y="432" fill="#111827">velocity_30m_count</text><text x="1284" y="432" fill="#111827">371k</text><rect x="1180" y="420" width="66" height="10" fill="#5b9bd5"/>
+    <text x="900" y="470" fill="#111827">vpn_cidr_lookup</text><text x="1284" y="470" fill="#111827">214k</text><rect x="1180" y="458" width="42" height="10" fill="#5b9bd5"/>
+    <text x="900" y="508" fill="#111827">device_regex_match</text><text x="1284" y="508" fill="#111827">118k</text><rect x="1180" y="496" width="24" height="10" fill="#5b9bd5"/>
+  </g>
+
+  <rect x="238" y="568" width="1162" height="280" rx="8" fill="#ffffff" stroke="#dfe3ea"/>
+  <text x="258" y="604" font-family="Inter, Arial, sans-serif" font-size="16" font-weight="700" fill="#111827">Recent Decisions</text>
+  <g font-family="Inter, Arial, sans-serif" font-size="13">
+    <text x="258" y="640" fill="#667085">TIME</text><text x="420" y="640" fill="#667085">DECISION</text><text x="570" y="640" fill="#667085">SCORE</text><text x="690" y="640" fill="#667085">RISK</text><text x="820" y="640" fill="#667085">WINNING RULE</text><text x="1170" y="640" fill="#667085">SOURCE</text>
+    <line x1="258" y1="654" x2="1378" y2="654" stroke="#e5e7eb"/>
+    <text x="258" y="686" fill="#111827">22:04:18.014</text><text x="420" y="686" fill="#b42318">BLOCK</text><text x="570" y="686" fill="#111827">92.0</text><text x="690" y="686" fill="#b42318">HIGH</text><text x="820" y="686" fill="#111827">high_amount_foreign</text><text x="1170" y="686" fill="#111827">kafka:payments</text>
+    <text x="258" y="728" fill="#111827">22:04:18.021</text><text x="420" y="728" fill="#b54708">REVIEW</text><text x="570" y="728" fill="#111827">61.5</text><text x="690" y="728" fill="#b54708">MEDIUM</text><text x="820" y="728" fill="#111827">velocity_30m_count</text><text x="1170" y="728" fill="#111827">agent:http</text>
+    <text x="258" y="770" fill="#111827">22:04:18.029</text><text x="420" y="770" fill="#027a48">APPROVE</text><text x="570" y="770" fill="#111827">0.0</text><text x="690" y="770" fill="#027a48">LOW</text><text x="820" y="770" fill="#667085">-</text><text x="1170" y="770" fill="#111827">ndjson:file</text>
+    <text x="258" y="812" fill="#111827">22:04:18.044</text><text x="420" y="812" fill="#b42318">BLOCK</text><text x="570" y="812" fill="#111827">88.0</text><text x="690" y="812" fill="#b42318">HIGH</text><text x="820" y="812" fill="#111827">vpn_cidr_lookup</text><text x="1170" y="812" fill="#111827">kafka:payments</text>
+  </g>
+</svg>

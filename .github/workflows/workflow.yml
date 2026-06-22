@@ -41,7 +41,7 @@ jobs:
             os: ubuntu-latest
             archs: x86_64
             triplet: x64-linux
-            vcpkg-root: /project/.vcpkg
+            vcpkg-root: /tmp/vcpkg
           - name: macOS x86_64
             os: macos-13
             archs: x86_64
@@ -66,6 +66,7 @@ jobs:
           python-version: "3.12"
 
       - name: Clone vcpkg
+        if: runner.os != 'Linux'
         shell: bash
         run: |
           git clone --depth 1 https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
@@ -92,10 +93,19 @@ jobs:
 
           {
             echo "CIBW_ARCHS=${{ matrix.archs }}"
+            echo "CIBW_BUILD_VERBOSITY=1"
             echo "CIBW_ENVIRONMENT<<EOF"
             echo "VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} CMAKE_ARGS='${CMAKE_RELEASE_ARGS}'"
             echo "EOF"
           } >> "$GITHUB_ENV"
+
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            {
+              echo "CIBW_BEFORE_ALL<<EOF"
+              echo "git clone --depth 1 https://github.com/microsoft/vcpkg ${VCPKG_ROOT_PATH} && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
+          fi
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.1.4
@@ -125,4 +135,3 @@ jobs:
 
       - name: Publish package distributions to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
-
