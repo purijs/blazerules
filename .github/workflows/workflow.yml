@@ -102,15 +102,34 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "git clone --depth 1 https://github.com/microsoft/vcpkg ${VCPKG_ROOT_PATH} && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
+              echo "rm -rf ${VCPKG_ROOT_PATH} && git clone --depth 1 https://github.com/microsoft/vcpkg ${VCPKG_ROOT_PATH} && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
+
+      - name: Show wheel build environment
+        shell: bash
+        run: |
+          echo "CIBW_ARCHS=${CIBW_ARCHS}"
+          echo "CIBW_ENVIRONMENT=${CIBW_ENVIRONMENT}"
+          echo "CIBW_BEFORE_ALL=${CIBW_BEFORE_ALL:-}"
+          echo "CIBW_CONFIG_SETTINGS=${CIBW_CONFIG_SETTINGS:-}"
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.1.4
         env:
           CIBW_OUTPUT_DIR: wheelhouse
+
+      - name: Upload wheel failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-failure-${{ matrix.os }}-${{ matrix.archs }}
+          path: |
+            wheelhouse
+            ./**/*.log
+            ./**/CMakeCache.txt
+          if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v4
         with:
