@@ -1,0 +1,82 @@
+[build-system]
+requires = ["scikit-build-core>=0.10", "pybind11>=2.12"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "blazerules"
+version = "0.1.0"
+description = "Batch-first C++20 vectorized decision engine with Python bindings"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { file = "LICENSE" }
+authors = [
+  { name = "BlazeRules contributors" }
+]
+keywords = [
+  "rules-engine",
+  "fraud",
+  "risk",
+  "streaming",
+  "arrow",
+  "simd",
+  "pybind11"
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Programming Language :: C++",
+  "Programming Language :: C++ :: 20",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "numpy>=1.26",
+  "pyarrow>=16",
+]
+
+[project.urls]
+Homepage = "https://blazerules.dev"
+Documentation = "https://blazerules.readme.io/docs/getting-started"
+Repository = "https://github.com/purijs/blazerules"
+Issues = "https://github.com/purijs/blazerules/issues"
+
+[tool.scikit-build]
+cmake.version = ">=3.22"
+wheel.packages = []
+wheel.install-dir = "."
+sdist.include = [
+  "CMakeLists.txt",
+  "CMakePresets.json",
+  "LICENSE",
+  "README.md",
+  "include/**",
+  "src/**",
+  "vcpkg.json",
+]
+sdist.exclude = [
+  ".github/**",
+  "charts/**",
+  "documentation/**",
+  "vde_extract/**",
+  "results/**",
+  "kafka_stress_artifacts/**",
+  "cmake-build-*/**",
+  ".venv*/**",
+  "rules.yaml",
+  "sample_lookups/**",
+  "sample_transaction.json",
+]
+
+[tool.cibuildwheel]
+build = "cp310-* cp311-* cp312-* cp313-*"
+skip = "pp* *-musllinux*"
+test-requires = ["numpy", "pyarrow"]
+test-command = "python -c \"import blazerules; print(blazerules.__version__, blazerules.simd_backend())\""
+
+[tool.cibuildwheel.linux]
+before-all = "/project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"

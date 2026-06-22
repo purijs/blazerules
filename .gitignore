@@ -33,6 +33,8 @@ build/
 Build/
 build-*/
 cmake-build-*/
+dist/
+wheelhouse/
 
 CMakeFiles/
 CMakeCache.txt
@@ -85,6 +87,7 @@ lookups/
 documentation/
 scripts/docs/
 .github/workflows/readme-docs-sync.yml
+!.github/workflows/workflow.yml
 readme_guide.md
 
 # Product/planning source docs kept local.

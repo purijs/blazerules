@@ -12,9 +12,6 @@ set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-if(APPLE)
-        set(CMAKE_OSX_ARCHITECTURES "arm64")
-endif()
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
@@ -186,6 +183,9 @@ target_link_libraries(blazerules_driver PRIVATE blazerules_core)
 
 pybind11_add_module(blazerules MODULE src/bindings/pybind_module.cpp)
 target_link_libraries(blazerules PRIVATE blazerules_core)
+install(TARGETS blazerules
+        LIBRARY DESTINATION .
+        RUNTIME DESTINATION .)
 
 option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" OFF)
 option(BLAZERULES_IO_KAFKA "Kafka source/sink via librdkafka (needs the io module)" ON)
