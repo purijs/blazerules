@@ -1,5 +1,11 @@
 # BlazeRules
 
+[![Docs](https://img.shields.io/badge/docs-readme.io-2563eb)](https://blazerules.readme.io/docs/getting-started)
+[![GitHub](https://img.shields.io/badge/github-purijs%2Fblazerules-111827?logo=github)](https://github.com/purijs/blazerules)
+![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)
+![Python](https://img.shields.io/badge/python-pybind11-3776AB?logo=python)
+![Build](https://img.shields.io/badge/build-Release-success)
+
 BlazeRules is an embeddable C++20 vectorized decision engine with a Python
 module named `blazerules`. It evaluates YAML rule sets over batches of JSON,
 NDJSON, or Apache Arrow records. The core is batch-first: collect records from a
