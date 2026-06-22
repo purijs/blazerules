@@ -49,6 +49,7 @@ Issues = "https://github.com/purijs/blazerules/issues"
 cmake.version = ">=3.22"
 wheel.packages = []
 wheel.install-dir = "."
+install.components = ["python"]
 sdist.include = [
   "CMakeLists.txt",
   "CMakePresets.json",

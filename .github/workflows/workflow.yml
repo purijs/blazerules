@@ -95,7 +95,7 @@ jobs:
             echo "CIBW_ARCHS=${{ matrix.archs }}"
             echo "CIBW_BUILD_VERBOSITY=1"
             echo "CIBW_ENVIRONMENT<<EOF"
-            echo "VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} CMAKE_ARGS='${CMAKE_RELEASE_ARGS}'"
+            echo "VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} CMAKE_ARGS='${CMAKE_RELEASE_ARGS}' SKBUILD_CMAKE_ARGS='${CMAKE_RELEASE_ARGS}' SKBUILD_BUILD_VERBOSE=true SKBUILD_LOGGING_LEVEL=INFO"
             echo "EOF"
           } >> "$GITHUB_ENV"
 

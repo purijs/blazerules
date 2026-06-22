@@ -185,7 +185,8 @@ pybind11_add_module(blazerules MODULE src/bindings/pybind_module.cpp)
 target_link_libraries(blazerules PRIVATE blazerules_core)
 install(TARGETS blazerules
         LIBRARY DESTINATION .
-        RUNTIME DESTINATION .)
+        RUNTIME DESTINATION .
+        COMPONENT python)
 
 option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" OFF)
 option(BLAZERULES_IO_KAFKA "Kafka source/sink via librdkafka (needs the io module)" ON)
@@ -273,10 +274,12 @@ install(TARGETS blazerules_core
         EXPORT blazerulesTargets
         ARCHIVE DESTINATION lib
         LIBRARY DESTINATION lib
-        RUNTIME DESTINATION bin)
+        RUNTIME DESTINATION bin
+        COMPONENT dev)
 
-install(DIRECTORY include/blazerules DESTINATION include)
+install(DIRECTORY include/blazerules DESTINATION include COMPONENT dev)
 
 install(EXPORT blazerulesTargets
         NAMESPACE blazerules::
-        DESTINATION lib/cmake/blazerules)
+        DESTINATION lib/cmake/blazerules
+        COMPONENT dev)
