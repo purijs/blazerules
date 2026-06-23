@@ -124,7 +124,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
+              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers nasm && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics && sed -i '/enable-capieng/d' /project/.vcpkg/ports/openssl/portfile.cmake"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
