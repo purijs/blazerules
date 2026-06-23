@@ -48,22 +48,14 @@ jobs:
             os: ubuntu-latest
             archs: x86_64
             triplet: x64-linux
-            vcpkg-root: /tmp/vcpkg
-          - name: macOS x86_64
-            os: macos-13
-            archs: x86_64
-            triplet: x64-osx
-            vcpkg-root: host
           - name: macOS arm64
             os: macos-14
             archs: arm64
             triplet: arm64-osx
-            vcpkg-root: host
           - name: Windows x86_64
             os: windows-latest
             archs: AMD64
             triplet: x64-windows-static-md
-            vcpkg-root: host
 
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +65,6 @@ jobs:
           python-version: "3.12"
 
       - name: Clone vcpkg
-        if: runner.os != 'Linux'
         shell: bash
         run: |
           rm -rf "$GITHUB_WORKSPACE/.vcpkg"
@@ -81,51 +72,41 @@ jobs:
           git -C "$GITHUB_WORKSPACE/.vcpkg" remote add origin https://github.com/microsoft/vcpkg
           git -C "$GITHUB_WORKSPACE/.vcpkg" fetch --depth 1 origin "$VCPKG_BASELINE"
           git -C "$GITHUB_WORKSPACE/.vcpkg" checkout --detach FETCH_HEAD
-          if [[ "$RUNNER_OS" == "Windows" ]]; then
-            cmd //c "%GITHUB_WORKSPACE%\\.vcpkg\\bootstrap-vcpkg.bat -disableMetrics"
-          else
-            "$GITHUB_WORKSPACE/.vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+          if [[ "$RUNNER_OS" != "Linux" ]]; then
+            if [[ "$RUNNER_OS" == "Windows" ]]; then
+              cmd //c "%GITHUB_WORKSPACE%\\.vcpkg\\bootstrap-vcpkg.bat -disableMetrics"
+            else
+              "$GITHUB_WORKSPACE/.vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+            fi
           fi
 
       - name: Configure cibuildwheel environment
         shell: bash
         run: |
-          if [[ "${{ matrix.vcpkg-root }}" == "host" ]]; then
-            if [[ "$RUNNER_OS" == "Windows" ]]; then
-              VCPKG_ROOT_PATH="$(cygpath -m "$GITHUB_WORKSPACE")/.vcpkg"
-            else
-              VCPKG_ROOT_PATH="$GITHUB_WORKSPACE/.vcpkg"
-            fi
+          if [[ "$RUNNER_OS" == "Windows" ]]; then
+            VCPKG_ROOT_PATH="$(cygpath -m "$GITHUB_WORKSPACE")/.vcpkg"
+          elif [[ "$RUNNER_OS" == "Linux" ]]; then
+            VCPKG_ROOT_PATH="/project/.vcpkg"
           else
-            VCPKG_ROOT_PATH="${{ matrix.vcpkg-root }}"
+            VCPKG_ROOT_PATH="$GITHUB_WORKSPACE/.vcpkg"
           fi
 
-          CMAKE_RELEASE_ARGS="-DCMAKE_TOOLCHAIN_FILE=${VCPKG_ROOT_PATH}/scripts/buildsystems/vcpkg.cmake -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} -DBLAZERULES_ENABLE_ONNX=ON -DBLAZERULES_IO=ON -DBLAZERULES_IO_KAFKA=ON -DBLAZERULES_IO_AVRO=ON -DBLAZERULES_IO_PROTOBUF=ON -DBLAZERULES_IO_S3=ON -DBLAZERULES_DASHBOARD=ON -DBLAZERULES_AGENT=ON -DBLAZERULES_NATIVE_TUNE=ON -DBLAZERULES_X86_AVX2=ON -DBLAZERULES_X86_AVX512=ON"
+          BASE_ENV="VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} SKBUILD_BUILD_VERBOSE=true SKBUILD_LOGGING_LEVEL=INFO"
+          if [[ "$RUNNER_OS" == "Linux" ]]; then
+            BASE_ENV="${BASE_ENV} SKBUILD_CMAKE_ARGS=-DBLAZERULES_NATIVE_TUNE=OFF"
+          fi
 
           {
             echo "CIBW_ARCHS=${{ matrix.archs }}"
             echo "CIBW_BUILD_VERBOSITY=1"
             echo "CIBW_ENVIRONMENT<<EOF"
-            echo "VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} CMAKE_ARGS='${CMAKE_RELEASE_ARGS}' SKBUILD_CMAKE_ARGS='${CMAKE_RELEASE_ARGS}' SKBUILD_BUILD_VERBOSE=true SKBUILD_LOGGING_LEVEL=INFO"
+            echo "$BASE_ENV"
             echo "EOF"
           } >> "$GITHUB_ENV"
 
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            {
-              echo "CIBW_BEFORE_ALL<<EOF"
-              echo "/opt/python/cp312-cp312/bin/python /project/ci/setup_vcpkg.py ${VCPKG_BASELINE} ${VCPKG_ROOT_PATH}"
-              echo "${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
-              echo "EOF"
-            } >> "$GITHUB_ENV"
+            echo "CIBW_BEFORE_ALL=/project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics" >> "$GITHUB_ENV"
           fi
-
-      - name: Show wheel build environment
-        shell: bash
-        run: |
-          echo "CIBW_ARCHS=${CIBW_ARCHS}"
-          echo "CIBW_ENVIRONMENT=${CIBW_ENVIRONMENT}"
-          echo "CIBW_BEFORE_ALL=${CIBW_BEFORE_ALL:-}"
-          echo "CIBW_CONFIG_SETTINGS=${CIBW_CONFIG_SETTINGS:-}"
 
       - name: Build wheels
         uses: pypa/cibuildwheel@v3.1.4
@@ -147,8 +128,7 @@ jobs:
                  -o -name "*.log" \) 2>/dev/null | head -n 8
           )
           if [[ ${#logs[@]} -eq 0 ]]; then
-            echo "No CMake/vcpkg log files found under RUNNER_TEMP or workspace." >> "$GITHUB_STEP_SUMMARY"
-            echo "::error title=Wheel failure diagnostics::No CMake/vcpkg log files found under RUNNER_TEMP or workspace."
+            echo "No CMake/vcpkg log files found." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           for log in "${logs[@]}"; do
@@ -156,12 +136,6 @@ jobs:
             echo '```text' >> "$GITHUB_STEP_SUMMARY"
             tail -n 80 "$log" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
-
-            msg="$(tail -n 40 "$log" | head -c 7000)"
-            msg="${msg//'%'/'%25'}"
-            msg="${msg//$'\r'/'%0D'}"
-            msg="${msg//$'\n'/'%0A'}"
-            echo "::error title=Wheel failure $(basename "$log")::${msg}"
           done
 
       - name: Upload wheel failure diagnostics
