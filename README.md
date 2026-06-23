@@ -6,179 +6,64 @@
 ![Python](https://img.shields.io/badge/python-pybind11-3776AB?logo=python)
 ![Build](https://img.shields.io/badge/build-Release-success)
 
-BlazeRules is an embeddable C++20 vectorized decision engine with a Python
-module named `blazerules`. It evaluates YAML rule sets over batches of JSON,
-NDJSON, or Apache Arrow records. The core is batch-first: collect records from a
-queue, file, API, or in-memory producer, then call the engine once per batch.
+BlazeRules evaluates YAML rules over high-volume event batches. Use it from
+Python, embed it in C++, or run the local agent to read logs and event streams
+from HTTP, stdin, file tails, Kafka, Arrow, Avro, Protobuf, S3, or local files.
 
 Repository: [github.com/purijs/blazerules](https://github.com/purijs/blazerules) ·
 Documentation: [blazerules.readme.io](https://blazerules.readme.io/docs/getting-started)
 
-The project is a library, not a hosted service. It is designed for fraud/risk
-screening, compliance routing, eligibility checks, AdTech filtering, and offline
-backtesting where deterministic rules should run before more expensive systems.
+The engine is batch-first internally. Ingestion adapters collect events into
+microbatches, infer or bind a schema, evaluate rules, and emit compact decisions
+or dead-letter records.
 
-## What It Does
-
-- Compiles YAML rules once into immutable execution plans.
-- Runs columnar predicates over Arrow buffers and transposed JSON batches.
-- Infers schema from the first evaluated batch when users do not provide one.
-- Supports flat and nested records through dotted field names.
-- Supports `array_any` / SQL `any_match(...)` for arrays of objects.
-- Reuses shared predicates globally and evaluates common scans once.
-- Emits decisions, scores, risk bands, winning rules, match counts, and optional
-  per-rule bitmasks.
-- Supports windows, lookups, regex, CIDR, temporal, geo, vector distance, and
-  ONNX `model_score` rules.
-- Uses runtime-dispatched SIMD kernels: ARM64 NEON, x86_64 AVX2/FMA, optional
-  AVX-512, and scalar fallback.
-- Exposes `blazerules_io` connectors/decoders for Kafka, CDC, Arrow IPC,
-  Avro, Protobuf, local files, and exact-object `s3://` reads.
-- Includes the local read-only dashboard and the multi-input agent in full
-  release builds.
-
-## Repository Layout
-
-```text
-include/blazerules/      C++ public core headers
-include/blazerules_io/   IO/streaming headers
-src/core/                Engine, kernels, transposer, dictionaries, windows
-src/compiler/            YAML/SQL parser, compiler, validation, conflicts
-src/bindings/            pybind11 modules
-src/io/                  Kafka/file/decoder implementation
-src/dashboard/           Local read-only dashboard
-src/agent/               Local multi-input agent
-charts/                  Optional Helm chart
-rules.yaml               Complete compact rule and multi-instance sample
-sample_transaction.json  JSON record matching rules.yaml
-sample_lookups/          Small lookup CSVs used by rules.yaml
-```
-
-Generated build directories, virtualenvs, benchmark results, stress corpora,
-models, and lookup data are intentionally ignored by git.
-
-## Build
-
-## Install From PyPI
-
-For the full Python package:
+## Install
 
 ```bash
 pip install blazerules
 ```
 
-The release wheel is built full-feature: native `blazerules`, `blazerules_io`,
-ONNX `model_score`, Kafka/CDC/Arrow IPC/Avro/Protobuf/S3 IO, dashboard, agent,
-runtime-dispatched SIMD kernels, schema inference, windows, lookups, regex,
-CIDR, temporal, geo, vector similarity, and decisions/scoring. `numpy` and
-`pyarrow` are declared Python runtime dependencies and are installed by pip.
+The Python package exposes `blazerules` and `blazerules_io`. It includes the
+core rule engine, IO helpers, ONNX scoring, the local ingest agent, and the local
+dashboard. `numpy` and `pyarrow` are installed as Python dependencies.
 
 ```bash
 python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
 ```
 
-## Build From Source
+## What BlazeRules Can Ingest
 
-macOS arm64 prerequisites:
-
-```bash
-brew install cmake ninja autoconf autoconf-archive automake libtool
-```
-
-Configure and build the core library, Python module, and driver:
-
-```bash
-cmake -S . -B cmake-build-release \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_TOOLCHAIN_FILE="$HOME/.vcpkg-clion/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-  -G Ninja
-
-cmake --build cmake-build-release --target blazerules_core blazerules blazerules_driver -j
-```
-
-Smoke:
-
-```bash
-export PYTHONPATH="$PWD/cmake-build-release"
-python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
-./cmake-build-release/blazerules_driver rules.yaml
-```
-
-CMake presets are included for common production shapes:
-
-```bash
-cmake --preset macos-arm64-release
-cmake --build --preset macos-arm64-release -j
-
-cmake --preset linux-x86_64-release-dispatch
-cmake --build --preset linux-x86_64-release-dispatch -j
-
-cmake --preset cloud-portable-release
-cmake --build --preset cloud-portable-release -j
-
-cmake --preset windows-x64-release-dispatch
-cmake --build --preset windows-x64-release-dispatch -j
-```
-
-## CMake Options
-
-| Option | Default | Purpose |
+| Input | How to use it | Typical use |
 | --- | --- | --- |
-| `BLAZERULES_ENABLE_ONNX` | `ON` | Enables `model_score` rules and `register_model()` |
-| `BLAZERULES_IO` | `ON` | Builds `blazerules_io` connectors/decoders |
-| `BLAZERULES_IO_KAFKA` | `ON` | Kafka source/sink inside `blazerules_io` |
-| `BLAZERULES_IO_AVRO` | `ON` | Avro binary decoder |
-| `BLAZERULES_IO_PROTOBUF` | `ON` | Protobuf descriptor decoder |
-| `BLAZERULES_DASHBOARD` | `ON` | Local read-only dashboard executable |
-| `BLAZERULES_AGENT` | `ON` | Local multi-input log/HTTP/file agent |
-| `BLAZERULES_NATIVE_TUNE` | `ON` | Local `-march=native` style tuning |
-| `BLAZERULES_X86_AVX2` | `ON` | Builds runtime-dispatched AVX2 kernels on x86_64 |
-| `BLAZERULES_X86_AVX512` | `ON` | Builds optional AVX-512 kernels on x86_64 |
+| JSON / NDJSON bytes | `RuleEngine.evaluate_ndjson(...)` | API payloads, application events, log lines already formatted as JSON. |
+| Python lists of JSON strings | `RuleEngine.evaluate_messages(...)` | Small integrations and local scripts. |
+| PyArrow / Arrow batches | `RuleEngine.evaluate_batch(...)` | Typed pipelines, Parquet/Arrow data, high-throughput paths. |
+| Kafka | `blazerules_io.KafkaConsumer` or `run_stream(...)` | Microbatch consume → evaluate → produce decisions. |
+| HTTP logs/events | `blazerules_agent --input http` or `instances[].input.type: http` | Apps POST NDJSON to `/v1/logs`. |
+| stdin | `blazerules_agent --input stdin` | Pipe terminal output or process logs into BlazeRules. |
+| File tail | `blazerules_agent --input file_tail --path app.log` | Pod logs, stdout/stderr files, node-local log files. |
+| Plain text logs | wrap each line as JSON first | Unstructured terminal/stdout/stderr text. |
+| Kubernetes logs | Helm chart / DaemonSet file-tail mode | Tail `/var/log/containers/...` and write decisions/DLQ. |
+| Debezium CDC | `blazerules_io.unwrap_debezium(...)` | Evaluate database change events. |
+| Arrow IPC | `blazerules_io.ArrowIpcDecoder` | Binary columnar frames. |
+| Avro | `blazerules_io.AvroDecoder` | Schema-based binary events. |
+| Protobuf | `blazerules_io.ProtobufDecoder` | Descriptor-backed binary events. |
+| S3 / local files | `read_ndjson_bytes(...)`, `read_record_batches(...)` | Offline jobs, backtests, lookup/model/rule loading. |
 
-The PyPI release workflow builds with the full feature set enabled. For a local
-source build, the defaults are also full-feature, but the flags can still be
-spelled out explicitly:
+All paths converge on the same batch evaluation engine. The adapters differ in
+how they collect and decode records; rule execution stays the same.
 
-```bash
-cmake -S . -B cmake-build-release \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DBLAZERULES_ENABLE_ONNX=ON \
-  -DBLAZERULES_IO=ON \
-  -DBLAZERULES_IO_KAFKA=ON \
-  -DBLAZERULES_IO_AVRO=ON \
-  -DBLAZERULES_IO_PROTOBUF=ON \
-  -DBLAZERULES_IO_S3=ON \
-  -DBLAZERULES_DASHBOARD=ON \
-  -DBLAZERULES_AGENT=ON \
-  -DBLAZERULES_NATIVE_TUNE=ON \
-  -DBLAZERULES_X86_AVX2=ON \
-  -DBLAZERULES_X86_AVX512=ON \
-  -G Ninja
-```
-
-## Dashboard Preview
-
-The dashboard is a local, read-only operational UI for rules, decision
-logs, dead-letter logs, source health, and benchmark summaries.
-
-![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
-
-## Python Quick Start
+## Quick Python Example
 
 ```python
 import blazerules
 
-config = blazerules.EngineConfig()
-config.output_detail = blazerules.OutputDetail.DECISIONS
-
-engine = blazerules.RuleEngine(config)
+engine = blazerules.RuleEngine()
 engine.load_rules("rules.yaml")
 
 payload = b"""
-{"card_token":"card_1","amount":2500.0,"device_type":"emulator",
- "country_code":"US","account_age_days":2,"hour_of_day":1.5}
-{"card_token":"card_2","amount":50.0,"device_type":"ios",
- "country_code":"GB","account_age_days":400,"hour_of_day":12}
+{"event_id":"e1","card_token":"card_1","amount":2500.0,"device_type":"emulator","country_code":"US"}
+{"event_id":"e2","card_token":"card_2","amount":50.0,"device_type":"ios","country_code":"GB"}
 """
 
 result = engine.evaluate_ndjson(payload)
@@ -188,9 +73,94 @@ print(result.match_counts)
 ```
 
 Rules can be loaded before a schema exists. The first evaluated batch samples
-rule-referenced fields, infers supported types, binds the schema, then compiles
-and activates the loaded rules. If you want explicit control, construct
-`RuleEngine(schema, config)` with `blazerules.Field(...)` definitions.
+rule-referenced fields and binds the inferred schema. You can still pass an
+explicit schema when you need strict control.
+
+## Local Agent For Logs And HTTP Events
+
+Run an HTTP ingest endpoint:
+
+```bash
+blazerules_agent \
+  --rules rules.yaml \
+  --input http \
+  --host 127.0.0.1 \
+  --port 9480 \
+  --batch-size 4096 \
+  --flush-ms 50 \
+  --output ndjson \
+  --output-path decisions.ndjson
+
+curl -X POST http://127.0.0.1:9480/v1/logs \
+  --data-binary $'{"event_id":"e1","message":"payment error","amount":99.5}\n'
+```
+
+Pipe stdin:
+
+```bash
+journalctl -u checkout -f -o json | \
+  blazerules_agent --rules rules.yaml --input stdin --output stdout
+```
+
+Tail a file:
+
+```bash
+blazerules_agent \
+  --rules rules.yaml \
+  --input file_tail \
+  --path /var/log/containers/checkout.log \
+  --output ndjson \
+  --output-path decisions.ndjson
+```
+
+Each agent input batches records by `batch_size` or `flush_ms`, evaluates the
+batch, and writes compact decision events. Bad records can be counted, skipped,
+or written to a dead-letter NDJSON file depending on ingest settings.
+
+## Decisions, DLQ, And Dashboard
+
+BlazeRules returns per-record decisions directly in Python/C++. The agent can
+also write an NDJSON decision log for downstream routing:
+
+```json
+{"ts_ms":1782150000000,"batch_row":0,"decision":"REVIEW","score":72.0,"risk_band":"HIGH","winning_rule_id":"high_risk_payment"}
+```
+
+Dead-letter records keep malformed or type-bad input out of the hot path while
+preserving enough context to debug the producer. The dashboard reads decision
+logs, dead-letter logs, metrics, benchmark output, and rule summaries.
+
+![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
+
+## Documentation
+
+Start here:
+
+- [Quickstart](https://blazerules.readme.io/docs/quickstart)
+- [Ingestion Overview](https://blazerules.readme.io/docs/ingestion-overview)
+- [HTTP Logs Recipe](https://blazerules.readme.io/docs/http-log-ingestion)
+- [stdin Recipe](https://blazerules.readme.io/docs/stdin-log-ingestion)
+- [File Tail Recipe](https://blazerules.readme.io/docs/file-tail-ingestion)
+- [Plain Text Logs Recipe](https://blazerules.readme.io/docs/plain-text-log-ingestion)
+- [Kubernetes Logs Recipe](https://blazerules.readme.io/docs/kubernetes-log-ingestion)
+- [DLQ Recipe](https://blazerules.readme.io/docs/decision-and-dlq-logs)
+- [Python API](https://blazerules.readme.io/docs/python-api)
+- [Build, C++ And Platforms](https://blazerules.readme.io/docs/build-cpp-platforms)
+
+## Build From Source
+
+Most users start with `pip install blazerules`. Build from source when you need
+to change native flags, embed the C++ library directly, or produce your own
+platform image.
+
+```bash
+cmake --preset linux-x86_64-release-dispatch
+cmake --build --preset linux-x86_64-release-dispatch -j
+```
+
+Build details, CMake options, C++ embedding, and architecture-specific notes are
+kept together in the documentation instead of spread through the getting-started
+path.
 
 ## Arrow Evaluation
 
