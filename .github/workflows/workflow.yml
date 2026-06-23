@@ -52,10 +52,6 @@ jobs:
             os: macos-14
             archs: arm64
             triplet: arm64-osx
-          - name: Windows x86_64
-            os: windows-latest
-            archs: AMD64
-            triplet: x64-windows-static-md
 
     steps:
       - uses: actions/checkout@v4
@@ -121,7 +117,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
+              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd kernel-headers && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi

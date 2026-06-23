@@ -187,8 +187,7 @@ target_link_libraries(blazerules_driver PRIVATE blazerules_core)
 pybind11_add_module(blazerules MODULE src/bindings/pybind_module.cpp)
 target_link_libraries(blazerules PRIVATE blazerules_core)
 install(TARGETS blazerules
-        LIBRARY DESTINATION .
-        RUNTIME DESTINATION .
+        DESTINATION .
         COMPONENT python)
 
 option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" ON)
@@ -251,8 +250,7 @@ if(BLAZERULES_IO)
         set_target_properties(blazerules_io_py PROPERTIES OUTPUT_NAME blazerules_io)
         target_link_libraries(blazerules_io_py PRIVATE blazerules_io)
         install(TARGETS blazerules_io_py
-                LIBRARY DESTINATION .
-                RUNTIME DESTINATION .
+                DESTINATION .
                 COMPONENT python)
         message(STATUS "BlazeRules: IO connectors ENABLED (kafka=${BLAZERULES_IO_KAFKA}, avro=${BLAZERULES_IO_AVRO}, protobuf=${BLAZERULES_IO_PROTOBUF}, s3=${BLAZERULES_IO_S3})")
 endif()
