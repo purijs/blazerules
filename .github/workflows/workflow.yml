@@ -129,10 +129,10 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers nasm && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics && mkdir -p /project/ports && cp -r /project/.vcpkg/ports/openssl /project/ports/ && sed -i '/enable-capieng\\|enable-static-engine/d' /project/ports/openssl/portfile.cmake"
+              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers nasm && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics && mkdir -p /project/ports && cp -r /project/.vcpkg/ports/openssl /project/ports/ && sed -i '/enable-capieng\\|enable-static-engine\\|enable-ec_nistp_64_gcc_128/d' /project/ports/openssl/portfile.cmake"
               echo "EOF"
               echo "CIBW_AFTER_ALL<<EOF"
-              echo "for f in /project/.vcpkg/buildtrees/openssl/config-x64-linux-rel-err.log /project/.vcpkg/buildtrees/openssl/config-x64-linux-rel-out.log; do [ -f \"\$f\" ] && echo \"=== \$f ===\" && tail -80 \"\$f\"; done"
+              echo "for f in /project/.vcpkg/buildtrees/openssl/config-x64-linux-rel-err.log /project/.vcpkg/buildtrees/openssl/config-x64-linux-rel-out.log; do [ -f \"\$f\" ] && echo \"=== \$f ===\" && tail -100 \"\$f\"; done"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
@@ -142,6 +142,25 @@ jobs:
         env:
           CIBW_OUTPUT_DIR: wheelhouse
 
+      - name: Show openssl configure log
+        if: failure() && runner.os == 'Linux'
+        shell: bash
+        run: |
+          set +e
+          echo "## openssl configure log" >> "$GITHUB_STEP_SUMMARY"
+          for log in \
+            "$GITHUB_WORKSPACE/.vcpkg/buildtrees/openssl/config-x64-linux-rel-err.log" \
+            "$GITHUB_WORKSPACE/.vcpkg/buildtrees/openssl/config-x64-linux-rel-out.log"; do
+            if sudo test -f "$log" 2>/dev/null; then
+              echo "### $log" >> "$GITHUB_STEP_SUMMARY"
+              echo '```text' >> "$GITHUB_STEP_SUMMARY"
+              sudo tail -100 "$log" >> "$GITHUB_STEP_SUMMARY"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+            else
+              echo "Not found: $log" >> "$GITHUB_STEP_SUMMARY"
+            fi
+          done
+
       - name: Summarize wheel failure logs
         if: failure()
         shell: bash
@@ -149,21 +168,16 @@ jobs:
           set +e
           echo "## Wheel failure diagnostics" >> "$GITHUB_STEP_SUMMARY"
           mapfile -t logs < <(
-            find "$RUNNER_TEMP" "$GITHUB_WORKSPACE" -type f \
-              \( -name "vcpkg-manifest-install.log" \
-                 -o -name "CMakeError.log" \
-                 -o -name "CMakeOutput.log" \
-                 -o -name "CMakeConfigureLog.yaml" \
-                 -o -name "*.log" \) 2>/dev/null | head -n 8
+            sudo find "$GITHUB_WORKSPACE" -type f -name "*.log" 2>/dev/null | head -n 8
           )
           if [[ ${#logs[@]} -eq 0 ]]; then
-            echo "No CMake/vcpkg log files found." >> "$GITHUB_STEP_SUMMARY"
+            echo "No log files found." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           for log in "${logs[@]}"; do
             echo "### ${log}" >> "$GITHUB_STEP_SUMMARY"
             echo '```text' >> "$GITHUB_STEP_SUMMARY"
-            tail -n 80 "$log" >> "$GITHUB_STEP_SUMMARY"
+            sudo tail -n 80 "$log" >> "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"
           done
 
