@@ -9,6 +9,9 @@ on:
 permissions:
   contents: read
 
+env:
+  VCPKG_BASELINE: eb35a05cc21c69ec1399f7532b7dd61d271ac0d1
+
 jobs:
   build-sdist:
     name: Build source distribution
@@ -69,7 +72,11 @@ jobs:
         if: runner.os != 'Linux'
         shell: bash
         run: |
-          git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
+          rm -rf "$GITHUB_WORKSPACE/.vcpkg"
+          git init "$GITHUB_WORKSPACE/.vcpkg"
+          git -C "$GITHUB_WORKSPACE/.vcpkg" remote add origin https://github.com/microsoft/vcpkg
+          git -C "$GITHUB_WORKSPACE/.vcpkg" fetch --depth 1 origin "$VCPKG_BASELINE"
+          git -C "$GITHUB_WORKSPACE/.vcpkg" checkout --detach FETCH_HEAD
           if [[ "$RUNNER_OS" == "Windows" ]]; then
             cmd //c "%GITHUB_WORKSPACE%\\.vcpkg\\bootstrap-vcpkg.bat -disableMetrics"
           else
@@ -102,7 +109,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "rm -rf ${VCPKG_ROOT_PATH} && git clone https://github.com/microsoft/vcpkg ${VCPKG_ROOT_PATH} && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
+              echo "rm -rf ${VCPKG_ROOT_PATH} && git init ${VCPKG_ROOT_PATH} && git -C ${VCPKG_ROOT_PATH} remote add origin https://github.com/microsoft/vcpkg && git -C ${VCPKG_ROOT_PATH} fetch --depth 1 origin ${VCPKG_BASELINE} && git -C ${VCPKG_ROOT_PATH} checkout --detach FETCH_HEAD && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
