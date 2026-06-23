@@ -129,7 +129,10 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers nasm && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics && mkdir -p /project/ports && cp -r /project/.vcpkg/ports/openssl /project/ports/ && sed -i '/enable-capieng/d' /project/ports/openssl/portfile.cmake"
+              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers nasm && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics && mkdir -p /project/ports && cp -r /project/.vcpkg/ports/openssl /project/ports/ && sed -i '/enable-capieng\\|enable-static-engine/d' /project/ports/openssl/portfile.cmake"
+              echo "EOF"
+              echo "CIBW_AFTER_ALL<<EOF"
+              echo "for f in /project/.vcpkg/buildtrees/openssl/config-x64-linux-rel-err.log /project/.vcpkg/buildtrees/openssl/config-x64-linux-rel-out.log; do [ -f \"\$f\" ] && echo \"=== \$f ===\" && tail -80 \"\$f\"; done"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
