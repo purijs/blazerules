@@ -104,11 +104,16 @@ jobs:
           fi
 
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            CMAKE_ARGS="'-DBLAZERULES_NATIVE_TUNE=OFF;-DVCPKG_BUILD_TYPE=release'"
+            TRIPLETS_PATH="/project/triplets"
+            CMAKE_ARGS="'-DBLAZERULES_NATIVE_TUNE=OFF'"
           else
-            CMAKE_ARGS="'-DVCPKG_BUILD_TYPE=release'"
+            TRIPLETS_PATH="$GITHUB_WORKSPACE/triplets"
+            CMAKE_ARGS=""
           fi
-          BASE_ENV="VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} SKBUILD_BUILD_VERBOSE=true SKBUILD_LOGGING_LEVEL=INFO SKBUILD_CMAKE_ARGS=${CMAKE_ARGS}"
+          BASE_ENV="VCPKG_ROOT=${VCPKG_ROOT_PATH} VCPKG_DEFAULT_TRIPLET=${{ matrix.triplet }} VCPKG_OVERLAY_TRIPLETS=${TRIPLETS_PATH} SKBUILD_BUILD_VERBOSE=true SKBUILD_LOGGING_LEVEL=INFO"
+          if [[ -n "$CMAKE_ARGS" ]]; then
+            BASE_ENV="${BASE_ENV} SKBUILD_CMAKE_ARGS=${CMAKE_ARGS}"
+          fi
 
           {
             echo "CIBW_ARCHS=${{ matrix.archs }}"
