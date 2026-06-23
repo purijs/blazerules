@@ -12,11 +12,9 @@ concurrency:
 
 permissions:
   contents: read
-  actions: write
 
 env:
   VCPKG_BASELINE: eb35a05cc21c69ec1399f7532b7dd61d271ac0d1
-  VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
 
 jobs:
   build-sdist:
@@ -127,9 +125,6 @@ jobs:
             {
               echo "CIBW_BEFORE_ALL<<EOF"
               echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template kernel-headers && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
-              echo "EOF"
-              echo "CIBW_ENVIRONMENT_PASS<<EOF"
-              echo "VCPKG_BINARY_SOURCES ACTIONS_CACHE_URL ACTIONS_RUNTIME_TOKEN"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
