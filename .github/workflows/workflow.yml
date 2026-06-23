@@ -44,7 +44,7 @@ jobs:
             os: ubuntu-latest
             archs: x86_64
             triplet: x64-linux
-            vcpkg-root: /tmp/vcpkg
+            vcpkg-root: /project/.vcpkg
           - name: macOS x86_64
             os: macos-13
             archs: x86_64
@@ -69,7 +69,6 @@ jobs:
           python-version: "3.12"
 
       - name: Clone vcpkg
-        if: runner.os != 'Linux'
         shell: bash
         run: |
           rm -rf "$GITHUB_WORKSPACE/.vcpkg"
@@ -109,7 +108,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "rm -rf ${VCPKG_ROOT_PATH} && git init ${VCPKG_ROOT_PATH} && git -C ${VCPKG_ROOT_PATH} remote add origin https://github.com/microsoft/vcpkg && git -C ${VCPKG_ROOT_PATH} fetch --depth 1 origin ${VCPKG_BASELINE} && git -C ${VCPKG_ROOT_PATH} checkout --detach FETCH_HEAD && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
+              echo "test -x ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh && ${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
