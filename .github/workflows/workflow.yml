@@ -67,11 +67,8 @@ jobs:
       - name: Clone vcpkg
         shell: bash
         run: |
-          rm -rf "$GITHUB_WORKSPACE/.vcpkg"
-          git init "$GITHUB_WORKSPACE/.vcpkg"
-          git -C "$GITHUB_WORKSPACE/.vcpkg" remote add origin https://github.com/microsoft/vcpkg
-          git -C "$GITHUB_WORKSPACE/.vcpkg" fetch --depth 1 origin "$VCPKG_BASELINE"
-          git -C "$GITHUB_WORKSPACE/.vcpkg" checkout --detach FETCH_HEAD
+          git clone --filter=blob:none --no-tags https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
+          git -C "$GITHUB_WORKSPACE/.vcpkg" checkout --detach "$VCPKG_BASELINE"
           if [[ "$RUNNER_OS" != "Linux" ]]; then
             if [[ "$RUNNER_OS" == "Windows" ]]; then
               cmd //c "%GITHUB_WORKSPACE%\\.vcpkg\\bootstrap-vcpkg.bat -disableMetrics"
@@ -105,7 +102,11 @@ jobs:
           } >> "$GITHUB_ENV"
 
           if [[ "$RUNNER_OS" == "Linux" ]]; then
-            echo "CIBW_BEFORE_ALL=/project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics" >> "$GITHUB_ENV"
+            {
+              echo "CIBW_BEFORE_ALL<<EOF"
+              echo "dnf install -y zip unzip tar curl && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
+              echo "EOF"
+            } >> "$GITHUB_ENV"
           fi
 
       - name: Build wheels
