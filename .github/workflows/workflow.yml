@@ -110,7 +110,7 @@ jobs:
             {
               echo "CIBW_BEFORE_ALL<<EOF"
               echo "PYBIN=\\$(command -v python3 || command -v python || ls /opt/python/*/bin/python | head -n 1)"
-              echo "\"\\${PYBIN}\" /project/ci/setup_vcpkg.py ${VCPKG_BASELINE} ${VCPKG_ROOT_PATH}"
+              echo "\"\${PYBIN}\" /project/ci/setup_vcpkg.py ${VCPKG_BASELINE} ${VCPKG_ROOT_PATH}"
               echo "${VCPKG_ROOT_PATH}/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
