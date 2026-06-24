@@ -124,7 +124,7 @@ jobs:
           if [[ "$RUNNER_OS" == "Linux" ]]; then
             {
               echo "CIBW_BEFORE_ALL<<EOF"
-              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template perl-Time-Piece flex bison kernel-headers nasm && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
+              echo "dnf install -y zip unzip tar curl perl-IPC-Cmd perl-Text-Template perl-Time-Piece flex bison m4 kernel-headers nasm && curl -LO https://ftp.gnu.org/gnu/bison/bison-3.8.2.tar.gz && tar xf bison-3.8.2.tar.gz && ( cd bison-3.8.2 && ./configure --prefix=/usr/local && make -j4 && make install ) && /project/.vcpkg/bootstrap-vcpkg.sh -disableMetrics"
               echo "EOF"
             } >> "$GITHUB_ENV"
           fi
