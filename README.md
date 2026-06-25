@@ -5,6 +5,7 @@
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)
 ![Python](https://img.shields.io/badge/python-pybind11-3776AB?logo=python)
 ![Build](https://img.shields.io/badge/build-Release-success)
+![License](https://img.shields.io/badge/license-FSL--1.1--ALv2-7c3aed)
 
 BlazeRules evaluates YAML rules over high-volume event batches. Use it from
 Python, embed it in C++, or run the local agent to read logs and event streams
@@ -12,6 +13,9 @@ from HTTP, stdin, file tails, Kafka, Arrow, Avro, Protobuf, S3, or local files.
 
 Repository: [github.com/purijs/blazerules](https://github.com/purijs/blazerules) ·
 Documentation: [blazerules.readme.io](https://blazerules.readme.io/docs/getting-started)
+
+License: source-available under `FSL-1.1-ALv2`; commercial/OEM licensing is
+available for managed-service, competing SaaS, and enterprise use.
 
 The engine is batch-first internally. Ingestion adapters collect events into
 microbatches, infer or bind a schema, evaluate rules, and emit compact decisions
@@ -145,6 +149,9 @@ Start here:
 - [Kubernetes Logs Recipe](https://blazerules.readme.io/docs/kubernetes-log-ingestion)
 - [DLQ Recipe](https://blazerules.readme.io/docs/decision-and-dlq-logs)
 - [Python API](https://blazerules.readme.io/docs/python-api)
+- [API and CLI Values Reference](https://blazerules.readme.io/docs/api-cli-values-reference)
+- [Production YAML Guide](https://blazerules.readme.io/docs/production-yaml-guide)
+- [Licensing](https://blazerules.readme.io/docs/licensing)
 - [Build, C++ And Platforms](https://blazerules.readme.io/docs/build-cpp-platforms)
 
 ## Build From Source
@@ -557,3 +564,28 @@ your own network controls.
 - YAML compatibility: `blazerules.RULE_YAML_COMPATIBILITY`.
 - Public API follows semantic versioning.
 - Rule operator behavior is stable within a compatible YAML major version.
+
+## License And Commercial Use
+
+BlazeRules is source-available under the Functional Source License 1.1,
+Apache 2.0 Future License (`FSL-1.1-ALv2`).
+
+You may use, modify, and redistribute BlazeRules for permitted purposes under
+the FSL. Offering BlazeRules or substantially similar functionality as a
+commercial hosted service, managed service, SaaS, API, platform, or competing
+product requires a commercial license.
+
+The intended product split is:
+
+- public/source-available data plane: local engine, SDKs, local agent,
+  local dashboard, examples, and integrations;
+- commercial/SaaS control plane: hosted rule editor, approval workflows,
+  versioning, fleet management, audit logs, registry, enterprise connectors,
+  certified builds, support, and BYOC/BYOL management.
+
+For commercial, OEM, managed-service, enterprise, or BYOC/BYOL licensing,
+contact `licensing@blazerules.dev`.
+
+See [LICENSE](LICENSE), [COMMERCIAL.md](COMMERCIAL.md),
+[TRADEMARKS.md](TRADEMARKS.md), and
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
