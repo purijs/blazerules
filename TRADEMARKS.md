@@ -3,9 +3,8 @@
 BlazeRules, the BlazeRules name, logos, visual marks, and related product names
 are trademarks or trade names of the project owner.
 
-The Functional Source License does not grant trademark rights except for
-identifying BlazeRules as the origin of the software and displaying license
-details.
+The Apache License 2.0 does not grant trademark rights except as required for
+reasonable and customary use in describing the origin of the software.
 
 ## Permitted Uses
 
@@ -30,4 +29,3 @@ including:
   project control;
 - modifying and redistributing the software under the BlazeRules name in a way
   that could confuse users about source or support responsibility.
-

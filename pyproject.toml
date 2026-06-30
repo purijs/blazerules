@@ -5,7 +5,7 @@ build-backend = "scikit_build_core.build"
 [project]
 name = "blazerules"
 version = "0.1.0"
-description = "Source-available batch-first C++20 vectorized decision engine with Python bindings"
+description = "Batch-first C++20 vectorized decision engine with Python bindings"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { file = "LICENSE" }
@@ -24,7 +24,7 @@ keywords = [
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Intended Audience :: Developers",
-  "License :: Other/Proprietary License",
+  "License :: OSI Approved :: Apache Software License",
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.10",
@@ -53,7 +53,6 @@ sdist.include = [
   "CMakeLists.txt",
   "CMakePresets.json",
   "LICENSE",
-  "COMMERCIAL.md",
   "TRADEMARKS.md",
   "THIRD_PARTY_NOTICES.md",
   "CONTRIBUTING.md",

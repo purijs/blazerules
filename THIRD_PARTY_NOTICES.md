@@ -35,7 +35,7 @@ license notices for the third-party libraries included in your distribution.
 
 ## Notes
 
-- BlazeRules' own source is licensed under `FSL-1.1-ALv2`; see `LICENSE`.
+- BlazeRules' own source is licensed under Apache-2.0; see `LICENSE`.
 - Third-party components keep their own licenses.
 - This notice is not legal advice and may not include every transitive
   dependency in every build profile.
