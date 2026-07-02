@@ -35,6 +35,13 @@ dashboard. `numpy` and `pyarrow` are installed as Python dependencies.
 python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
 ```
 
+Native CLI archives are attached to GitHub Releases and are built by GitHub Actions from the tagged source revision:
+
+- [Linux x86_64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-linux-x86_64.tar.gz)
+- [macOS arm64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-macos-arm64.tar.gz)
+
+These archives include `blazerules_driver`, `blazerules_agent`, and `blazerules_dashboard`. Release binaries use full feature flags. Linux keeps generic code portable and uses runtime-dispatched AVX2/AVX-512 kernels when the host CPU supports them; macOS arm64 uses the NEON backend.
+
 ## What BlazeRules Can Ingest
 
 | Input | How to use it | Typical use |
@@ -412,8 +419,37 @@ error_counts
 error_samples
 ```
 
-Use `OutputDetail.DECISIONS` for routing and `OutputDetail.BITMASKS` only when
-downstream code needs per-rule bitmasks.
+### Output detail: `DECISIONS` vs `BITMASKS`
+
+`EngineConfig.output_detail` decides how much per-record detail is materialized.
+**The build default is `OutputDetail.BITMASKS`.** Both modes give you the full
+routing output above (decisions, scores, risk bands, winning rules, `match_counts`,
+and every `indices_for_*` helper). `BITMASKS` additionally materializes a per-rule,
+per-record match mask, so you can ask *which* rules fired on *which* records —
+at the cost of one `⌈n/8⌉`-byte buffer per rule.
+
+```python
+config = blazerules.EngineConfig()
+
+# Routing-only (lighter): skip per-rule masks.
+config.output_detail = blazerules.OutputDetail.DECISIONS
+engine = blazerules.RuleEngine(config)
+result = engine.evaluate_ndjson(payload)
+result.indices_for_decision("BLOCK")   # works in both modes
+result.match_counts                    # per-rule totals, both modes
+
+# Per-rule attribution (requires BITMASKS):
+config.output_detail = blazerules.OutputDetail.BITMASKS
+engine = blazerules.RuleEngine(config)
+result = engine.evaluate_ndjson(payload)
+result["velocity_rule"]                # np.ndarray[bool]; KeyError under DECISIONS
+result.indices_for_rule("velocity_rule")
+```
+
+Set `OutputDetail.DECISIONS` for routing-only workloads to avoid the per-rule
+bitmask allocation; use `BITMASKS` when you need per-rule attribution. See
+[Decisions &amp; Scoring](https://blazerules.readme.io/docs/decisions-and-scoring)
+for the full breakdown.
 
 ## Windows
 

@@ -288,6 +288,11 @@ private:
     void configure_projection(const CompiledRuleSet& ruleset);
     EvalOptions eval_options() const;
     void install_ruleset(std::shared_ptr<CompiledRuleSet> next);
+    // Deactivate the active ruleset on the main engine and every partition shard,
+    // consistently (under each shard's lock). Used when a hot reload fails and the
+    // engine is configured not to keep the previous ruleset, so shards do not keep
+    // evaluating stale rules while the main path has none.
+    void clear_ruleset();
     ConflictReport compile_and_install_rules(const std::string& rules_path, bool update_reload_status);
     ConflictReport install_or_defer_rules(ParseFileResult parsed, bool update_reload_status,
                                           const std::string& rules_path);

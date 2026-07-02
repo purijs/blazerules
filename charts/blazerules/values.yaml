@@ -1,6 +1,8 @@
 image:
   repository: blazerules
-  tag: latest
+  # Pin to an immutable tag rather than "latest" so deployments are reproducible and
+  # cannot be silently changed by a registry push. Override per release.
+  tag: "0.2.0"
   pullPolicy: IfNotPresent
 
 agent:
@@ -26,6 +28,17 @@ agent:
     limits:
       cpu: "4"
       memory: "4Gi"
+  # The agent tails root-owned host logs under /var/log/containers, so it runs as
+  # root by default (as most Kubernetes log shippers do). It still drops all Linux
+  # capabilities, forbids privilege escalation, and uses a read-only root filesystem.
+  # Set runAsNonRoot/runAsUser only if your node log files are group/world-readable.
+  securityContext:
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
 
 rules:
   inline: |
@@ -42,9 +55,20 @@ rules:
 dashboard:
   enabled: true
   port: 9470
+  # The dashboard has NO built-in authentication and exposes operational state
+  # (rules, decisions, errors) on every /api/* endpoint. It binds 0.0.0.0 because it
+  # sits behind a ClusterIP Service (see below) and must accept the pod-network
+  # address; it is NOT reachable from outside the cluster unless you deliberately
+  # expose it. Do NOT put it behind a LoadBalancer/Ingress without an authenticating
+  # reverse proxy (OAuth2 proxy, mTLS, etc.). See docs/operations/deployment.md.
   host: 0.0.0.0
   service:
+    # ClusterIP keeps the dashboard cluster-internal. Do not change to LoadBalancer
+    # or NodePort without fronting it with authentication.
     type: ClusterIP
+  # When enabled, restrict which pods may reach the dashboard to the same release.
+  networkPolicy:
+    enabled: true
   decisionLogPath: /var/log/blazerules/decisions.ndjson
   deadLetterLogPath: /var/log/blazerules/dead_letters.ndjson
   metricsUrl: ""
@@ -56,6 +80,16 @@ dashboard:
     limits:
       cpu: "1"
       memory: "512Mi"
+  # The dashboard only reads its own config/logs, so it runs fully unprivileged.
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 1000
+    allowPrivilegeEscalation: false
+    readOnlyRootFilesystem: true
+    capabilities:
+      drop: ["ALL"]
+    seccompProfile:
+      type: RuntimeDefault
 
 persistence:
   enabled: false

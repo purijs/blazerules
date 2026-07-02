@@ -1,0 +1,150 @@
+name: Build release binaries
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+env:
+  VCPKG_BASELINE: eb35a05cc21c69ec1399f7532b7dd61d271ac0d1
+
+jobs:
+  build-binary:
+    name: Build ${{ matrix.name }} binary archive
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Linux x86_64
+            os: ubuntu-latest
+            triplet: x64-linux
+            asset: blazerules-linux-x86_64.tar.gz
+            native_tune: OFF
+          - name: macOS arm64
+            os: macos-14
+            triplet: arm64-osx
+            asset: blazerules-macos-arm64.tar.gz
+            native_tune: ON
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Linux build tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            autoconf automake bison build-essential cmake curl flex libtool m4 \
+            nasm ninja-build pkg-config tar unzip zip
+          curl -LO https://github.com/google/flatbuffers/archive/refs/tags/v25.12.19.tar.gz
+          tar xf v25.12.19.tar.gz
+          cmake -S flatbuffers-25.12.19 -B flatbuffers-25.12.19/build \
+            -DFLATBUFFERS_BUILD_TESTS=OFF \
+            -DCMAKE_BUILD_TYPE=Release
+          cmake --build flatbuffers-25.12.19/build --target flatc -j4
+          sudo cp flatbuffers-25.12.19/build/flatc /usr/local/bin/flatc
+
+      - name: Install macOS build tools
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          brew install autoconf automake bison libtool nasm ninja
+          echo "/opt/homebrew/opt/bison/bin" >> "$GITHUB_PATH"
+
+      - name: Cache vcpkg
+        id: vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ github.workspace }}/.vcpkg
+          key: vcpkg-release-${{ runner.os }}-${{ env.VCPKG_BASELINE }}
+
+      - name: Clone vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
+          git -C "$GITHUB_WORKSPACE/.vcpkg" checkout --detach "$VCPKG_BASELINE"
+
+      - name: Bootstrap vcpkg
+        shell: bash
+        run: |
+          "$GITHUB_WORKSPACE/.vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Configure Release
+        shell: bash
+        run: |
+          cmake -S . -B build-release -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/.vcpkg/scripts/buildsystems/vcpkg.cmake" \
+            -DVCPKG_TARGET_TRIPLET=${{ matrix.triplet }} \
+            -DVCPKG_OVERLAY_TRIPLETS="$GITHUB_WORKSPACE/triplets" \
+            -DVCPKG_OVERLAY_PORTS="$GITHUB_WORKSPACE/ports" \
+            -DBLAZERULES_ENABLE_ONNX=ON \
+            -DBLAZERULES_IO=ON \
+            -DBLAZERULES_IO_KAFKA=ON \
+            -DBLAZERULES_IO_AVRO=ON \
+            -DBLAZERULES_IO_PROTOBUF=ON \
+            -DBLAZERULES_IO_S3=ON \
+            -DBLAZERULES_DASHBOARD=ON \
+            -DBLAZERULES_AGENT=ON \
+            -DBLAZERULES_NATIVE_TUNE=${{ matrix.native_tune }} \
+            -DBLAZERULES_X86_AVX2=ON \
+            -DBLAZERULES_X86_AVX512=ON
+
+      - name: Build executables
+        shell: bash
+        run: |
+          cmake --build build-release --target \
+            blazerules_driver blazerules_agent blazerules_dashboard -j
+
+      - name: Package archive
+        shell: bash
+        run: |
+          rm -rf package
+          mkdir -p package/bin
+          cp build-release/blazerules_driver package/bin/
+          cp build-release/blazerules_agent package/bin/
+          cp build-release/blazerules_dashboard package/bin/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md package/
+          {
+            echo "BlazeRules ${GITHUB_REF_NAME:-manual}"
+            echo "Platform: ${{ matrix.name }}"
+            echo "Built by: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo "Features: ONNX, IO, Kafka, Avro, Protobuf, S3, dashboard, agent, runtime SIMD dispatch"
+          } > package/VERSION.txt
+          tar -C package -czf "${{ matrix.asset }}" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: ${{ matrix.asset }}
+
+  publish-release:
+    name: Attach binaries to GitHub Release
+    needs: build-binary
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Show release assets
+        run: ls -lh dist
+
+      - name: Publish release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
+          generate_release_notes: true

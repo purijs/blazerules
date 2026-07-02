@@ -160,6 +160,7 @@ StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config) {
     }
 
     StreamRunStats stats;
+    bool delivery_failed = false;
     while (true) {
         if (config.max_batches > 0 && stats.batches >= config.max_batches) break;
         if (config.max_messages > 0 && stats.messages >= config.max_messages) break;
@@ -182,11 +183,31 @@ StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config) {
         stats.eval_us += elapsed;
 
         if (producer) stats.emitted += emit_decisions(*producer, config.output_topic, result);
-        if (config.commit_offsets) consumer->commitSync();
+        if (config.commit_offsets) {
+            // At-least-once: durably deliver this batch's decisions before advancing the
+            // committed offset. commitSync() commits the consumer *position*, so a later
+            // successful batch would commit past a failed one and silently drop it — we
+            // must stop committing entirely on failure and let replay from the last good
+            // offset recover the affected batch on restart.
+            if (producer && !producer->flush(config.flush_timeout_ms)) {
+                delivery_failed = true;
+                break;
+            }
+            consumer->commitSync();
+        }
     }
 
-    if (producer) producer->flush(config.flush_timeout_ms);
+    if (producer) {
+        producer->flush(config.flush_timeout_ms);
+        stats.delivery_errors = static_cast<int64_t>(producer->delivery_errors());
+    }
     consumer->close();
+    if (delivery_failed) {
+        throw std::runtime_error(
+            "kafka: decision delivery failed; offsets left uncommitted so the affected "
+            "batch will be reprocessed on restart (delivery_errors=" +
+            std::to_string(stats.delivery_errors) + ")");
+    }
     return stats;
 }
 

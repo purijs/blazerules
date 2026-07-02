@@ -2,6 +2,7 @@
 
 #ifdef BLAZERULES_IO_KAFKA
 
+#include <atomic>
 #include <stdexcept>
 
 #include <librdkafka/rdkafkacpp.h>
@@ -95,10 +96,29 @@ void KafkaConsumer::close() {
     if (consumer_) consumer_->close();
 }
 
+// Counts failed broker delivery reports so callers can tell whether produced
+// messages were actually delivered (produce() only enqueues; delivery is async).
+class KafkaProducer::DeliveryReporter : public RdKafka::DeliveryReportCb {
+public:
+    void dr_cb(RdKafka::Message& message) override {
+        if (message.err() != RdKafka::ERR_NO_ERROR) {
+            errors_.fetch_add(1, std::memory_order_relaxed);
+        }
+    }
+    uint64_t errors() const { return errors_.load(std::memory_order_relaxed); }
+private:
+    std::atomic<uint64_t> errors_{0};
+};
+
 KafkaProducer::KafkaProducer(const std::string& brokers,
-                             const std::map<std::string, std::string>& extra_conf) {
+                             const std::map<std::string, std::string>& extra_conf)
+    : reporter_(std::make_unique<DeliveryReporter>()) {
     auto conf = make_conf(brokers, extra_conf);
     std::string err;
+    // Must be registered before create() so every delivery report is observed.
+    if (conf->set("dr_cb", reporter_.get(), err) != RdKafka::Conf::CONF_OK) {
+        throw std::runtime_error("kafka conf dr_cb: " + err);
+    }
     RdKafka::Producer* p = RdKafka::Producer::create(conf.get(), err);
     if (!p) throw std::runtime_error("kafka producer create: " + err);
     producer_.reset(p);
@@ -120,8 +140,16 @@ void KafkaProducer::produce(const std::string& topic, const std::string& value,
     producer_->poll(0);  // serve delivery callbacks
 }
 
-void KafkaProducer::flush(int timeout_ms) {
-    if (producer_) producer_->flush(timeout_ms);
+bool KafkaProducer::flush(int timeout_ms) {
+    if (!producer_) return true;
+    const uint64_t before = reporter_->errors();
+    RdKafka::ErrorCode ec = producer_->flush(timeout_ms);
+    const bool drained = ec == RdKafka::ERR_NO_ERROR && producer_->outq_len() == 0;
+    return drained && reporter_->errors() == before;
+}
+
+uint64_t KafkaProducer::delivery_errors() const {
+    return reporter_ ? reporter_->errors() : 0;
 }
 
 }  // namespace blazerules_io

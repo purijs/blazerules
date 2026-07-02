@@ -242,9 +242,23 @@ ParseConditionResult ok_condition(ConditionSpec value) {
     return ParseConditionResult{true, std::move(value), BlazeRulesError{}};
 }
 
-ParseConditionResult parse_condition(const YAML::Node& node, const std::string& rule_id);
+ParseConditionResult unknown_op_error(const std::string& op_text, const std::string& rule_id) {
+    BlazeRulesError error;
+    error.code = BlazeRulesError::UNKNOWN_OP;
+    error.message = "unknown operator: '" + op_text + "'";
+    error.source = "rule";
+    error.rule_id = rule_id;
+    error.domain = BlazeRulesError::Domain::RULE_PARSE;
+    return ParseConditionResult{false, {}, std::move(error)};
+}
 
-ParseConditionResult parse_window_leaf(const YAML::Node& node) {
+// Bound recursion so a hostile deeply-nested and/or/not tree in an untrusted rule
+// file (S3, hot-reload) is rejected with a clean error instead of overflowing the
+// stack. yaml-cpp bounds its own document nesting, but guard explicitly regardless.
+constexpr int kMaxConditionDepth = 128;
+ParseConditionResult parse_condition(const YAML::Node& node, const std::string& rule_id, int depth = 0);
+
+ParseConditionResult parse_window_leaf(const YAML::Node& node, const std::string& rule_id) {
     const YAML::Node win = node["window"];
     const YAML::Node op_owner = win["op"] ? win : node;
     const YAML::Node val_owner = win["value"] ? win : node;
@@ -258,12 +272,14 @@ ParseConditionResult parse_window_leaf(const YAML::Node& node) {
                               : win["numerator_field"].as<std::string>(""));
     spec.denominator_field = win["denominator_field"].as<std::string>("");
     spec.duration_seconds = win["duration_seconds"].as<int>();
-    spec.op = op_from_string(op_owner["op"].as<std::string>());
+    std::string op_text = op_owner["op"].as<std::string>();
+    spec.op = op_from_string(op_text);
+    if (spec.op == OpType::INVALID) return unknown_op_error(op_text, rule_id);
     spec.threshold = val_owner["value"].as<double>();
     return ok_condition(std::move(spec));
 }
 
-ParseConditionResult parse_model_score_leaf(const YAML::Node& node) {
+ParseConditionResult parse_model_score_leaf(const YAML::Node& node, const std::string& rule_id) {
     const YAML::Node m = node["model_score"];
     const YAML::Node op_owner = m["op"] ? m : node;
     const YAML::Node val_owner = m["value"] ? m : node;
@@ -275,7 +291,9 @@ ParseConditionResult parse_model_score_leaf(const YAML::Node& node) {
         for (const auto& f : m["features"]) spec.features.push_back(f.as<std::string>());
     }
     spec.output_index = m["output_index"].as<int>(0);
-    spec.op = op_from_string(op_owner["op"].as<std::string>("gt"));
+    std::string op_text = op_owner["op"].as<std::string>("gt");
+    spec.op = op_from_string(op_text);
+    if (spec.op == OpType::INVALID) return unknown_op_error(op_text, rule_id);
     const YAML::Node vn = val_owner["value"];
     if (spec.op == OpType::BETWEEN_INCLUDING || spec.op == OpType::BETWEEN_EXCLUDING) {
         spec.lower = vn[0].as<double>();
@@ -293,7 +311,7 @@ VectorMetric vector_metric_from_string(const std::string& s) {
     return VectorMetric::COSINE;
 }
 
-ParseConditionResult parse_vector_distance_leaf(const YAML::Node& node) {
+ParseConditionResult parse_vector_distance_leaf(const YAML::Node& node, const std::string& rule_id) {
     const YAML::Node vec = node["vector_distance"];
     const YAML::Node op_owner = vec["op"] ? vec : node;
     const YAML::Node val_owner = vec["value"] ? vec : node;
@@ -306,7 +324,9 @@ ParseConditionResult parse_vector_distance_leaf(const YAML::Node& node) {
         for (const auto& r : vec["reference"]) spec.reference.push_back(r.as<float>());
     }
     spec.metric = vector_metric_from_string(vec["metric"].as<std::string>("cosine"));
-    spec.op = op_from_string(op_owner["op"].as<std::string>("gt"));
+    std::string op_text = op_owner["op"].as<std::string>("gt");
+    spec.op = op_from_string(op_text);
+    if (spec.op == OpType::INVALID) return unknown_op_error(op_text, rule_id);
     const YAML::Node vn = val_owner["value"];
     if (spec.op == OpType::BETWEEN_INCLUDING || spec.op == OpType::BETWEEN_EXCLUDING) {
         spec.lower = vn[0].as<double>();
@@ -317,19 +337,21 @@ ParseConditionResult parse_vector_distance_leaf(const YAML::Node& node) {
     return ok_condition(std::move(spec));
 }
 
-ParseConditionResult parse_array_any_leaf(const YAML::Node& node, const std::string& rule_id) {
+ParseConditionResult parse_array_any_leaf(const YAML::Node& node, const std::string& rule_id, int depth) {
     const YAML::Node arr = node["array_any"];
     ArrayAnyConditionSpec spec;
     spec.path = arr["path"].as<std::string>();
-    auto parsed = parse_condition(arr["where"], rule_id);
+    auto parsed = parse_condition(arr["where"], rule_id, depth + 1);
     if (!parsed.ok) return parsed;
     spec.where = std::make_shared<ConditionSpec>(std::move(parsed.value));
     spec.synthetic_field = array_any_synthetic_name(spec.path, YAML::Dump(arr));
     return ok_condition(std::move(spec));
 }
 
-ParseConditionResult parse_field_leaf(const YAML::Node& node) {
-    OpType op = op_from_string(node["op"].as<std::string>());
+ParseConditionResult parse_field_leaf(const YAML::Node& node, const std::string& rule_id) {
+    std::string op_text = node["op"].as<std::string>();
+    OpType op = op_from_string(op_text);
+    if (op == OpType::INVALID) return unknown_op_error(op_text, rule_id);
     if (op == OpType::IS_NULL || op == OpType::IS_NOT_NULL ||
         op == OpType::IS_EMPTY || op == OpType::IS_NOT_EMPTY) {
         NullConditionSpec spec;
@@ -487,8 +509,16 @@ ParseConditionResult parse_field_leaf(const YAML::Node& node) {
     return ok_condition(std::move(spec));
 }
 
-ParseConditionResult parse_condition(const YAML::Node& node, const std::string& rule_id) {
-    (void)rule_id;
+ParseConditionResult parse_condition(const YAML::Node& node, const std::string& rule_id, int depth) {
+    if (depth > kMaxConditionDepth) {
+        BlazeRulesError error;
+        error.code = BlazeRulesError::UNKNOWN_OP;
+        error.message = "condition nesting too deep (limit " + std::to_string(kMaxConditionDepth) + ")";
+        error.source = "rule";
+        error.rule_id = rule_id;
+        error.domain = BlazeRulesError::Domain::RULE_PARSE;
+        return ParseConditionResult{false, {}, std::move(error)};
+    }
     if (node["sql"] || (node["expr"] && node["expr"].IsScalar())) {
         const YAML::Node sql = node["sql"] ? node["sql"] : node["expr"];
         SqlParseResult parsed = parse_sql_expression(sql.as<std::string>());
@@ -506,7 +536,8 @@ ParseConditionResult parse_condition(const YAML::Node& node, const std::string& 
     if (node["and"]) {
         AndConditionSpec spec;
         for (const auto& child : node["and"]) {
-            auto parsed = parse_condition(child, rule_id);
+            auto parsed = parse_condition(child, rule_id, depth + 1);
+            if (!parsed.ok) return parsed;
             spec.child_condition.push_back(std::move(parsed.value));
         }
         return ok_condition(std::move(spec));
@@ -514,30 +545,32 @@ ParseConditionResult parse_condition(const YAML::Node& node, const std::string& 
     if (node["or"]) {
         OrConditionSpec spec;
         for (const auto& child : node["or"]) {
-            auto parsed = parse_condition(child, rule_id);
+            auto parsed = parse_condition(child, rule_id, depth + 1);
+            if (!parsed.ok) return parsed;
             spec.child_condition.push_back(std::move(parsed.value));
         }
         return ok_condition(std::move(spec));
     }
     if (node["not"]) {
         NotConditionSpec spec;
-        auto parsed = parse_condition(node["not"], rule_id);
+        auto parsed = parse_condition(node["not"], rule_id, depth + 1);
+        if (!parsed.ok) return parsed;
         spec.child_condition.push_back(std::move(parsed.value));
         return ok_condition(std::move(spec));
     }
     if (node["window"]) {
-        return parse_window_leaf(node);
+        return parse_window_leaf(node, rule_id);
     }
     if (node["model_score"]) {
-        return parse_model_score_leaf(node);
+        return parse_model_score_leaf(node, rule_id);
     }
     if (node["vector_distance"]) {
-        return parse_vector_distance_leaf(node);
+        return parse_vector_distance_leaf(node, rule_id);
     }
     if (node["array_any"]) {
-        return parse_array_any_leaf(node, rule_id);
+        return parse_array_any_leaf(node, rule_id, depth);
     }
-    return parse_field_leaf(node);
+    return parse_field_leaf(node, rule_id);
 }
 
 ParseRuleResult parse_rule(const YAML::Node& node, const std::string& ruleset_version) {
@@ -554,13 +587,18 @@ ParseRuleResult parse_rule(const YAML::Node& node, const std::string& ruleset_ve
 
     std::string action_text = node["action"].as<std::string>("flag");
     spec.action_label = decision_label(action_text);
-    if (!action_from_string(action_text, spec.action)) spec.action = ActionType::SCORE;
+    if (!action_from_string(action_text, spec.action)) {
+        return ParseRuleResult{false, {}, {BlazeRulesError::UNKNOWN_ACTION,
+                                           "unknown action: '" + action_text + "'", "rule", spec.id,
+                                           -1, BlazeRulesError::Domain::RULE_PARSE}};
+    }
     if (!severity_from_string(node["severity"].as<std::string>("LOW"), spec.severity)) {
         return ParseRuleResult{false, {}, {BlazeRulesError::UNKNOWN_SEVERITY, "unknown severity", "rule", spec.id,
                                            -1, BlazeRulesError::Domain::RULE_PARSE}};
     }
 
     auto cond = parse_condition(node["conditions"], spec.id);
+    if (!cond.ok) return ParseRuleResult{false, {}, std::move(cond.error)};
     spec.root_condition = std::move(cond.value);
     return ParseRuleResult{true, std::move(spec), BlazeRulesError{}};
 }

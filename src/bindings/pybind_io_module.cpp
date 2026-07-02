@@ -363,7 +363,8 @@ PYBIND11_MODULE(blazerules_io, m) {
         .def_readonly("messages", &blazerules_io::StreamRunStats::messages)
         .def_readonly("matched", &blazerules_io::StreamRunStats::matched)
         .def_readonly("emitted", &blazerules_io::StreamRunStats::emitted)
-        .def_readonly("eval_us", &blazerules_io::StreamRunStats::eval_us);
+        .def_readonly("eval_us", &blazerules_io::StreamRunStats::eval_us)
+        .def_readonly("delivery_errors", &blazerules_io::StreamRunStats::delivery_errors);
 
     m.def("run_stream",
           [](RuleEngine& engine, const blazerules_io::StreamRunConfig& config) {

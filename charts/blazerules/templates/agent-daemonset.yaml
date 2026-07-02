@@ -24,6 +24,10 @@ spec:
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["/usr/local/bin/blazerules_agent"]
           args: ["--config", "/etc/blazerules/agent.yaml"]
+          {{- with .Values.agent.securityContext }}
+          securityContext:
+{{ toYaml . | indent 12 }}
+          {{- end }}
           resources:
 {{ toYaml .Values.agent.resources | indent 12 }}
           volumeMounts:
@@ -42,7 +46,9 @@ spec:
         - name: varlog
           hostPath:
             path: /var/log
+            type: Directory
         - name: containerlogs
           hostPath:
             path: /var/log/containers
+            type: Directory
 {{- end }}

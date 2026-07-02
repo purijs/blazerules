@@ -4,6 +4,7 @@
 
 #include <arrow/api.h>
 
+#include <limits>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -36,6 +37,17 @@ template <typename T>
 T value_or_throw(arrow::Result<T> result, std::string_view context) {
     if (!result.ok()) throw std::runtime_error(status_message(result.status(), context));
     return std::move(result).ValueOrDie();
+}
+
+// protobuf's ParseFromArray takes an int length. Reject frames that would overflow
+// that cast (>2GB) before parsing, so a hostile/corrupt frame cannot wrap the length
+// negative and drive an out-of-bounds read inside protobuf.
+int checked_frame_size(std::string_view frame) {
+    if (frame.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        throw std::runtime_error("protobuf frame too large: " + std::to_string(frame.size()) +
+                                 " bytes exceeds 2GB limit");
+    }
+    return static_cast<int>(frame.size());
 }
 
 bool read_varint(std::string_view data, size_t& pos, uint64_t& value) {
@@ -396,7 +408,7 @@ std::string ProtobufDecoder::decode_ndjson(const std::vector<std::string_view>& 
         if (frame.empty()) continue;
         frame = strip_confluent_protobuf_prefix(frame);
         std::unique_ptr<google::protobuf::Message> message(impl_->prototype->New());
-        if (!message->ParseFromArray(frame.data(), static_cast<int>(frame.size()))) {
+        if (!message->ParseFromArray(frame.data(), checked_frame_size(frame))) {
             throw std::runtime_error("protobuf message parse failed");
         }
         std::string json;
@@ -426,7 +438,7 @@ std::shared_ptr<arrow::RecordBatch> ProtobufDecoder::decode_batch(
         if (frame.empty()) continue;
         frame = strip_confluent_protobuf_prefix(frame);
         std::unique_ptr<google::protobuf::Message> message(impl_->prototype->New());
-        if (!message->ParseFromArray(frame.data(), static_cast<int>(frame.size()))) {
+        if (!message->ParseFromArray(frame.data(), checked_frame_size(frame))) {
             throw std::runtime_error("protobuf message parse failed");
         }
 

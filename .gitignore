@@ -95,3 +95,7 @@ blazerules.md
 vde_extract/
 MARKET_STRATEGY.md
 docs-implementation-audit.md
+design.md
+
+# macOS
+.DS_Store

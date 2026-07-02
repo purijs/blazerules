@@ -1,8 +1,8 @@
 {
   "name" : "blazerules",
-  "version" : "0.1.0",
+  "version" : "0.2.0",
   "builtin-baseline" : "eb35a05cc21c69ec1399f7532b7dd61d271ac0d1",
-  "dependencies" : [ "arrow", "abseil", "tbb", "yaml-cpp", "re2", "cpp-httplib", {
+  "dependencies" : [ "arrow", "abseil", "tbb", "yaml-cpp", "re2", "cpp-httplib", "pybind11", {
     "name" : "simdjson",
     "version>=" : "4.6.4"
   } ],
@@ -29,6 +29,10 @@
         "name" : "arrow",
         "features" : [ "s3" ]
       } ]
+    },
+    "tests" : {
+      "description" : "Build the BlazeRules C++ test suite",
+      "dependencies" : [ "gtest" ]
     }
   },
   "default-features" : [ "onnx", "io", "io-avro", "io-protobuf", "io-s3" ]

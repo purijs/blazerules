@@ -205,6 +205,19 @@ public:
     }
 
 private:
+    // Bound recursive descent so a hostile deeply-nested/parenthesized expression
+    // (e.g. "((((...))))" or "NOT NOT NOT ...") is rejected with a clean parse error
+    // instead of overflowing the stack. Rules can arrive from untrusted sources
+    // (S3, hot-reload), so treat expression text as untrusted.
+    static constexpr int kMaxDepth = 128;
+    struct DepthGuard {
+        int& depth;
+        explicit DepthGuard(int& d) : depth(d) {
+            if (++depth > kMaxDepth) throw std::runtime_error("expression nesting too deep");
+        }
+        ~DepthGuard() { --depth; }
+    };
+
     void advance() { cur_ = lexer_.next(); }
     bool is_keyword(const char* kw) const {
         return cur_.kind == Tok::IDENT && upper(cur_.text) == kw;
@@ -215,6 +228,7 @@ private:
     }
 
     ConditionSpec parse_or() {
+        DepthGuard guard(depth_);
         ConditionSpec left = parse_and();
         std::vector<ConditionSpec> kids;
         while (is_keyword("OR")) {
@@ -243,6 +257,7 @@ private:
     }
 
     ConditionSpec parse_not() {
+        DepthGuard guard(depth_);
         if (is_keyword("NOT")) {
             advance();
             NotConditionSpec spec;
@@ -399,6 +414,7 @@ private:
 
     Lexer lexer_;
     Token cur_;
+    int depth_ = 0;
 };
 
 }  // namespace

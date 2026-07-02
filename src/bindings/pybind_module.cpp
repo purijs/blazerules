@@ -176,6 +176,25 @@ decltype(auto) call_blazerules(F&& f,
     }
 }
 
+// Fully validate a batch that crossed the FFI boundary before the engine touches
+// its raw buffers. ValidateFull() checks offset buffers (length n+1, monotonic,
+// in-bounds) and UTF-8, so a malformed/corrupt batch is rejected here with a clean
+// exception instead of causing an out-of-bounds read deep in the hot path
+// (e.g. the string-offset fast path in dict_encoder). Runs once per batch, not per row.
+std::shared_ptr<arrow::RecordBatch> validate_imported_batch(
+        arrow::Result<std::shared_ptr<arrow::RecordBatch>> imported) {
+    if (!imported.ok()) {
+        throw std::runtime_error("failed to import Arrow record batch: " +
+                                 imported.status().ToString());
+    }
+    std::shared_ptr<arrow::RecordBatch> batch = imported.MoveValueUnsafe();
+    arrow::Status status = batch->ValidateFull();
+    if (!status.ok()) {
+        throw std::runtime_error("invalid Arrow record batch: " + status.ToString());
+    }
+    return batch;
+}
+
 std::shared_ptr<arrow::RecordBatch> import_record_batch(py::object batch) {
     if (py::hasattr(batch, "__arrow_c_array__")) {
         py::object exported = batch.attr("__arrow_c_array__")();
@@ -184,14 +203,14 @@ std::shared_ptr<arrow::RecordBatch> import_record_batch(py::object batch) {
             PyCapsule_GetPointer(pair[0].ptr(), "arrow_schema"));
         auto* c_array = reinterpret_cast<ArrowArray*>(
             PyCapsule_GetPointer(pair[1].ptr(), "arrow_array"));
-        return arrow::ImportRecordBatch(c_array, c_schema).ValueOrDie();
+        return validate_imported_batch(arrow::ImportRecordBatch(c_array, c_schema));
     }
 
     ArrowArray c_array;
     ArrowSchema c_schema;
     batch.attr("_export_to_c")(reinterpret_cast<uintptr_t>(&c_array),
                                reinterpret_cast<uintptr_t>(&c_schema));
-    return arrow::ImportRecordBatch(&c_array, &c_schema).ValueOrDie();
+    return validate_imported_batch(arrow::ImportRecordBatch(&c_array, &c_schema));
 }
 
 py::array_t<bool> bitmask_to_bool(const std::vector<uint8_t>& bm, int n) {

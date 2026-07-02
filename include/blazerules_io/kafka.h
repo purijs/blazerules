@@ -3,6 +3,7 @@
 
 #ifdef BLAZERULES_IO_KAFKA
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <string>
@@ -51,9 +52,16 @@ public:
     KafkaProducer& operator=(const KafkaProducer&) = delete;
 
     void produce(const std::string& topic, const std::string& value, const std::string& key = "");
-    void flush(int timeout_ms = 5000);
+    // Flush pending messages. Returns true iff the queue drained within the timeout and
+    // no broker delivery report reported a failure; a false return means one or more
+    // messages were NOT delivered and the caller must not treat them as durable.
+    bool flush(int timeout_ms = 5000);
+    // Cumulative count of failed deliveries reported by the broker since construction.
+    uint64_t delivery_errors() const;
 
 private:
+    class DeliveryReporter;
+    std::unique_ptr<DeliveryReporter> reporter_;
     std::unique_ptr<RdKafka::Producer> producer_;
 };
 

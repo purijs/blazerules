@@ -1,0 +1,28 @@
+{{- if and .Values.dashboard.enabled .Values.dashboard.networkPolicy.enabled }}
+# The dashboard has no authentication. This NetworkPolicy limits inbound traffic on
+# its port to pods in the same namespace carrying this release's instance label, so a
+# compromised or unrelated workload elsewhere in the cluster cannot reach the API.
+# Loosen the ingress selector only if you also front the dashboard with authentication.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-blazerules-dashboard
+  labels:
+    app.kubernetes.io/name: blazerules-dashboard
+    app.kubernetes.io/instance: {{ .Release.Name }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: blazerules-dashboard
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/instance: {{ .Release.Name }}
+      ports:
+        - protocol: TCP
+          port: {{ .Values.dashboard.port }}
+{{- end }}

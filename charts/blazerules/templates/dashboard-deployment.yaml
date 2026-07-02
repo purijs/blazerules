@@ -35,6 +35,10 @@ spec:
             - {{ .Values.dashboard.deadLetterLogPath | quote }}
             - "--rules"
             - "/etc/blazerules/rules.yaml"
+          {{- with .Values.dashboard.securityContext }}
+          securityContext:
+{{ toYaml . | indent 12 }}
+          {{- end }}
           ports:
             - name: http
               containerPort: {{ .Values.dashboard.port }}

@@ -32,12 +32,24 @@ std::shared_ptr<arrow::Buffer> owned_buffer_from_view(std::string_view view) {
     return arrow::Buffer::FromVector(std::move(bytes));
 }
 
+// Arrow IPC frames arrive from untrusted sources (Kafka, files). Fully validate
+// each batch (offset buffers, bounds, UTF-8) before the engine reads its raw
+// buffers, so a corrupt/malicious frame fails cleanly here rather than causing an
+// out-of-bounds read downstream. Once per batch, not per row.
+void validate_batch(const std::shared_ptr<arrow::RecordBatch>& batch) {
+    arrow::Status status = batch->ValidateFull();
+    if (!status.ok()) throw std::runtime_error(status_message(status, "arrow ipc batch validation"));
+}
+
 void drain_stream(const std::shared_ptr<arrow::ipc::RecordBatchStreamReader>& reader,
                   std::vector<std::shared_ptr<arrow::RecordBatch>>& out) {
     while (true) {
         auto batch = value_or_throw(reader->Next(), "arrow ipc stream read");
         if (!batch) break;
-        if (batch->num_rows() > 0) out.push_back(std::move(batch));
+        if (batch->num_rows() > 0) {
+            validate_batch(batch);
+            out.push_back(std::move(batch));
+        }
     }
 }
 
@@ -59,7 +71,10 @@ std::vector<std::shared_ptr<arrow::RecordBatch>> read_ipc_from_buffer(
     out.reserve(static_cast<size_t>(batches));
     for (int i = 0; i < batches; ++i) {
         auto batch = value_or_throw(file_reader->ReadRecordBatch(i), "arrow ipc file read");
-        if (batch && batch->num_rows() > 0) out.push_back(std::move(batch));
+        if (batch && batch->num_rows() > 0) {
+            validate_batch(batch);
+            out.push_back(std::move(batch));
+        }
     }
     return out;
 }
@@ -108,7 +123,10 @@ std::vector<std::shared_ptr<arrow::RecordBatch>> ArrowIpcDecoder::decode_file(
     out.reserve(static_cast<size_t>(batches));
     for (int i = 0; i < batches; ++i) {
         auto batch = value_or_throw(file_reader->ReadRecordBatch(i), "arrow ipc file read");
-        if (batch && batch->num_rows() > 0) out.push_back(std::move(batch));
+        if (batch && batch->num_rows() > 0) {
+            validate_batch(batch);
+            out.push_back(std::move(batch));
+        }
     }
     return out;
 }

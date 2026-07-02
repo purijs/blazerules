@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 if(DEFINED ENV{VCPKG_ROOT} AND NOT CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE PATH "")
 endif()
-project(blazerules VERSION 0.1.0 LANGUAGES CXX)
+project(blazerules VERSION 0.2.0 LANGUAGES CXX)
 include(CheckCXXCompilerFlag)
 include(CheckIPOSupported)
 
@@ -279,6 +279,22 @@ if(BLAZERULES_AGENT)
         endif()
         install(TARGETS blazerules_agent RUNTIME DESTINATION bin COMPONENT python)
         message(STATUS "BlazeRules: agent ENABLED")
+endif()
+
+
+option(BLAZERULES_TESTS "Build the BlazeRules C++ test suite" OFF)
+if(BLAZERULES_TESTS)
+        enable_testing()
+        find_package(GTest CONFIG REQUIRED)
+        add_executable(blazerules_tests
+                tests/parser_compile_tests.cpp
+                tests/fail_closed_tests.cpp
+                tests/kernel_tests.cpp
+                tests/window_store_tests.cpp
+        )
+        target_link_libraries(blazerules_tests PRIVATE blazerules_core GTest::gtest_main)
+        include(GoogleTest)
+        gtest_discover_tests(blazerules_tests)
 endif()
 
 install(TARGETS blazerules_core

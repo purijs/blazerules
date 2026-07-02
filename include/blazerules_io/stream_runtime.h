@@ -33,6 +33,7 @@ struct StreamRunStats {
     int64_t matched = 0;
     int64_t emitted = 0;
     int64_t eval_us = 0;
+    int64_t delivery_errors = 0;
 };
 
 StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config);

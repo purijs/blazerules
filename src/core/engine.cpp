@@ -1008,8 +1008,9 @@ void RuleEngine::hot_reload_loop(std::string rules_file_path, std::chrono::secon
                 (void)reload_rules_now(rules_file_path);
             } catch (const BlazeRulesException&) {
                 if (!config_.hot_reload_keep_previous_on_failure) {
-                    std::atomic_store_explicit(&ruleset_, std::shared_ptr<CompiledRuleSet>{},
-                                               std::memory_order_release);
+                    // Clear main engine AND shards together so no shard keeps evaluating
+                    // stale rules after a failed reload.
+                    clear_ruleset();
                 }
             } catch (const std::exception& e) {
                 std::lock_guard<std::mutex> lock(reload_status_mutex_);
@@ -1338,6 +1339,17 @@ void RuleEngine::install_ruleset(std::shared_ptr<CompiledRuleSet> next) {
         if (shard) {
             std::unique_lock<std::shared_mutex> shard_lock(shard->state_mutex_);
             shard->install_ruleset(next);
+        }
+    }
+}
+
+void RuleEngine::clear_ruleset() {
+    std::atomic_store_explicit(&ruleset_, std::shared_ptr<CompiledRuleSet>{},
+                               std::memory_order_release);
+    for (auto& shard : partition_shards_) {
+        if (shard) {
+            std::unique_lock<std::shared_mutex> shard_lock(shard->state_mutex_);
+            shard->clear_ruleset();
         }
     }
 }

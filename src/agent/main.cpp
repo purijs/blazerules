@@ -18,6 +18,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <sys/stat.h>
+
 #include <httplib.h>
 #include <yaml-cpp/yaml.h>
 
@@ -317,10 +319,19 @@ private:
         if (!batch.empty()) submit_lines(batch);
     }
 
+    // Return the inode of a path, or 0 if it cannot be stat'd.
+    static ino_t file_inode(const std::string& path) {
+        struct stat st{};
+        return ::stat(path.c_str(), &st) == 0 ? st.st_ino : 0;
+    }
+
     void run_file_tail() {
         std::ifstream in(config_.input.path);
         if (!in) throw std::runtime_error("failed to open input file: " + config_.input.path);
         in.seekg(0, std::ios::end);
+        ino_t current_inode = file_inode(config_.input.path);
+        std::streamoff read_pos = in.tellg();
+        if (read_pos < 0) read_pos = 0;
         std::vector<std::string> batch;
         batch.reserve(static_cast<size_t>(config_.batch_size));
         auto last_flush = std::chrono::steady_clock::now();
@@ -336,8 +347,28 @@ private:
                     last_flush = std::chrono::steady_clock::now();
                 }
             }
+            in.clear();
+            std::streamoff pos = in.tellg();
+            if (pos >= 0) read_pos = pos;
             if (!got) {
-                in.clear();
+                // Detect log rotation (path now points at a new inode) or in-place
+                // truncation (file shorter than our read position, e.g. copytruncate).
+                // In either case the old descriptor is drained; reopen and read the new
+                // file from the start so we don't silently stop ingesting after rotate.
+                struct stat st{};
+                if (::stat(config_.input.path.c_str(), &st) == 0 &&
+                    (st.st_ino != current_inode || st.st_size < read_pos)) {
+                    if (!batch.empty()) {
+                        submit_lines(batch);
+                        batch.clear();
+                        last_flush = std::chrono::steady_clock::now();
+                    }
+                    in.close();
+                    in.open(config_.input.path);
+                    current_inode = st.st_ino;
+                    read_pos = 0;
+                    continue;
+                }
                 std::this_thread::sleep_for(std::chrono::milliseconds(200));
             }
             auto now = std::chrono::steady_clock::now();
@@ -371,6 +402,10 @@ private:
             while (!g_stop.load()) std::this_thread::sleep_for(std::chrono::milliseconds(200));
             server.stop();
         });
+        if (config_.input.host == "0.0.0.0") {
+            std::cerr << "warning: agent HTTP input has no authentication and is bound to 0.0.0.0; "
+                         "run it on a trusted network or behind an authenticating reverse proxy\n";
+        }
         std::cerr << "BlazeRules agent instance '" << config_.name << "' listening on http://"
                   << config_.input.host << ":" << config_.input.port << "/v1/logs\n";
         server.listen(config_.input.host, config_.input.port);

@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  VCPKG_BASELINE: eb35a05cc21c69ec1399f7532b7dd61d271ac0d1
+
+jobs:
+  cpp-tests:
+    name: C++ tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install system build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y             autoconf automake bison curl flex libtool nasm ninja-build             pkg-config tar unzip zip
+
+      - name: Cache vcpkg
+        id: vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ github.workspace }}/.vcpkg
+            ${{ github.workspace }}/build-tests/vcpkg_installed
+          key: ci-vcpkg-${{ runner.os }}-${{ env.VCPKG_BASELINE }}-${{ hashFiles('vcpkg.json') }}
+
+      - name: Clone vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          git clone https://github.com/microsoft/vcpkg "$GITHUB_WORKSPACE/.vcpkg"
+          git -C "$GITHUB_WORKSPACE/.vcpkg" checkout --detach "$VCPKG_BASELINE"
+
+      - name: Bootstrap vcpkg
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
+        run: |
+          "$GITHUB_WORKSPACE/.vcpkg/bootstrap-vcpkg.sh" -disableMetrics
+
+      - name: Configure tests
+        run: |
+          cmake -S . -B build-tests -G Ninja             -DCMAKE_BUILD_TYPE=Release             -DCMAKE_TOOLCHAIN_FILE="$GITHUB_WORKSPACE/.vcpkg/scripts/buildsystems/vcpkg.cmake"             -DVCPKG_MANIFEST_NO_DEFAULT_FEATURES=ON             -DVCPKG_MANIFEST_FEATURES=tests             -DBLAZERULES_TESTS=ON             -DBLAZERULES_ENABLE_ONNX=OFF             -DBLAZERULES_IO=OFF             -DBLAZERULES_DASHBOARD=OFF             -DBLAZERULES_AGENT=OFF             -DBLAZERULES_NATIVE_TUNE=OFF             -DBLAZERULES_X86_AVX512=OFF
+
+      - name: Build tests
+        run: cmake --build build-tests --target blazerules_tests -j 2
+
+      - name: Run tests
+        run: ctest --test-dir build-tests --output-on-failure
+
+  docs:
+    name: Docs checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate docs
+        run: make docs-validate
