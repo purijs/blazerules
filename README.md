@@ -4,14 +4,15 @@
 [![GitHub](https://img.shields.io/badge/github-purijs%2Fblazerules-111827?logo=github)](https://github.com/purijs/blazerules)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)
 ![Python](https://img.shields.io/badge/python-pybind11-3776AB?logo=python)
-![Build](https://img.shields.io/badge/build-Release-success)
+[![Build and publish Python wheels](https://github.com/purijs/blazerules/actions/workflows/workflow.yml/badge.svg)](https://github.com/purijs/blazerules/actions/workflows/workflow.yml)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
-BlazeRules evaluates YAML rules over high-volume event batches. Use it from
+[BlazeRules](https://blazerules.dev/) evaluates YAML rules over high-volume event batches. Use it from
 Python, embed it in C++, or run the local agent to read logs and event streams
 from HTTP, stdin, file tails, Kafka, Arrow, Avro, Protobuf, S3, or local files.
 
-Repository: [github.com/purijs/blazerules](https://github.com/purijs/blazerules) ·
+Website: [https://blazerules.dev/](https://blazerules.dev/)
+
 Documentation: [blazerules.readme.io](https://blazerules.readme.io/docs/getting-started)
 
 License: Apache-2.0.
