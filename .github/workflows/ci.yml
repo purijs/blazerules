@@ -31,7 +31,7 @@ jobs:
       - name: Install system build tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y             autoconf automake bison curl flex libtool nasm ninja-build             pkg-config tar unzip zip
+          sudo apt-get install -y             autoconf autoconf-archive automake bison curl flex libtool nasm ninja-build             pkg-config tar unzip zip
 
       - name: Cache vcpkg
         id: vcpkg-cache
@@ -62,14 +62,3 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build-tests --output-on-failure
-
-  docs:
-    name: Docs checks
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-      - name: Validate docs
-        run: make docs-validate

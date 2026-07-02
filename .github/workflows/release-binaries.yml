@@ -44,8 +44,8 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            autoconf automake bison build-essential cmake curl flex libtool m4 \
-            nasm ninja-build pkg-config tar unzip zip
+            autoconf autoconf-archive automake bison build-essential cmake curl flex libtool m4 \
+            nasm ninja-build pkg-config python3 tar unzip zip
           curl -LO https://github.com/google/flatbuffers/archive/refs/tags/v25.12.19.tar.gz
           tar xf v25.12.19.tar.gz
           cmake -S flatbuffers-25.12.19 -B flatbuffers-25.12.19/build \
