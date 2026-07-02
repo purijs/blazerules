@@ -60,8 +60,16 @@ find_package(TBB CONFIG REQUIRED)
 find_package(yaml-cpp CONFIG REQUIRED)
 find_package(re2 CONFIG REQUIRED)
 
-set(PYBIND11_FINDPYTHON ON)
-find_package(pybind11 CONFIG REQUIRED)
+# pybind11 is only needed to build the Python extension, which is only built as part of
+# the wheel. scikit-build-core sets SKBUILD and provides pybind11 (from pyproject build
+# requires) plus the target interpreter, so it resolves Python's Development.Module
+# correctly. Guarding this keeps plain CMake builds (CLI binaries, C++ tests) from
+# requiring pybind11/Python, and avoids a vcpkg pybind11 copy mis-detecting the isolated
+# wheel interpreter.
+if(SKBUILD)
+    set(PYBIND11_FINDPYTHON ON)
+    find_package(pybind11 CONFIG REQUIRED)
+endif()
 
 add_library(blazerules_core STATIC
         src/compiler/dsl_parser.cpp
@@ -184,11 +192,13 @@ endif()
 add_executable(blazerules_driver src/driver/main.cpp)
 target_link_libraries(blazerules_driver PRIVATE blazerules_core)
 
-pybind11_add_module(blazerules MODULE src/bindings/pybind_module.cpp)
-target_link_libraries(blazerules PRIVATE blazerules_core)
-install(TARGETS blazerules
-        DESTINATION .
-        COMPONENT python)
+if(SKBUILD)
+    pybind11_add_module(blazerules MODULE src/bindings/pybind_module.cpp)
+    target_link_libraries(blazerules PRIVATE blazerules_core)
+    install(TARGETS blazerules
+            DESTINATION .
+            COMPONENT python)
+endif()
 
 option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" ON)
 option(BLAZERULES_IO_KAFKA "Kafka source/sink via librdkafka (needs the io module)" ON)
@@ -246,12 +256,14 @@ if(BLAZERULES_IO)
                 target_compile_definitions(blazerules_io PUBLIC BLAZERULES_IO_S3)
         endif()
 
-        pybind11_add_module(blazerules_io_py MODULE src/bindings/pybind_io_module.cpp)
-        set_target_properties(blazerules_io_py PROPERTIES OUTPUT_NAME blazerules_io)
-        target_link_libraries(blazerules_io_py PRIVATE blazerules_io)
-        install(TARGETS blazerules_io_py
-                DESTINATION .
-                COMPONENT python)
+        if(SKBUILD)
+                pybind11_add_module(blazerules_io_py MODULE src/bindings/pybind_io_module.cpp)
+                set_target_properties(blazerules_io_py PROPERTIES OUTPUT_NAME blazerules_io)
+                target_link_libraries(blazerules_io_py PRIVATE blazerules_io)
+                install(TARGETS blazerules_io_py
+                        DESTINATION .
+                        COMPONENT python)
+        endif()
         message(STATUS "BlazeRules: IO connectors ENABLED (kafka=${BLAZERULES_IO_KAFKA}, avro=${BLAZERULES_IO_AVRO}, protobuf=${BLAZERULES_IO_PROTOBUF}, s3=${BLAZERULES_IO_S3})")
 endif()
 
