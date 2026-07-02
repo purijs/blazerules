@@ -58,7 +58,7 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          brew install autoconf automake bison libtool nasm ninja
+          brew install autoconf autoconf-archive automake bison libtool nasm ninja
           echo "/opt/homebrew/opt/bison/bin" >> "$GITHUB_PATH"
 
       - name: Cache vcpkg

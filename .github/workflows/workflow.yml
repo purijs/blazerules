@@ -87,7 +87,7 @@ jobs:
       - name: Install macOS build tools
         if: runner.os == 'macOS'
         run: |
-          brew install bison
+          brew install autoconf autoconf-archive automake bison libtool
           echo "/opt/homebrew/opt/bison/bin" >> "$GITHUB_PATH"
 
       - name: Configure cibuildwheel environment
