@@ -29,6 +29,11 @@ jobs:
             triplet: x64-linux
             asset: blazerules-linux-x86_64.tar.gz
             native_tune: OFF
+          - name: Linux aarch64
+            os: ubuntu-24.04-arm
+            triplet: arm64-linux
+            asset: blazerules-linux-aarch64.tar.gz
+            native_tune: OFF
           - name: macOS arm64
             os: macos-14
             triplet: arm64-osx
@@ -66,7 +71,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ github.workspace }}/.vcpkg
-          key: vcpkg-release-${{ runner.os }}-${{ env.VCPKG_BASELINE }}
+          key: vcpkg-release-${{ runner.os }}-${{ matrix.triplet }}-${{ env.VCPKG_BASELINE }}
 
       - name: Clone vcpkg
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'

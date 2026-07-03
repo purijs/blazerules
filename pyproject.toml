@@ -7,7 +7,7 @@ name = "blazerules"
 version = "0.2.0"
 description = "Batch-first C++20 vectorized decision engine with Python bindings"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 license = { file = "LICENSE" }
 authors = [
   { name = "BlazeRules contributors" }
@@ -27,6 +27,7 @@ classifiers = [
   "License :: OSI Approved :: Apache Software License",
   "Programming Language :: C++",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
   "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
@@ -76,7 +77,7 @@ sdist.exclude = [
 ]
 
 [tool.cibuildwheel]
-build = "cp310-* cp311-* cp312-* cp313-*"
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux*"
 test-requires = ["numpy", "pyarrow"]
 test-command = "python -c \"import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())\""
