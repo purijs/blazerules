@@ -49,7 +49,7 @@ These archives include `blazerules_driver`, `blazerules_agent`, and `blazerules_
 | JSON / NDJSON bytes | `RuleEngine.evaluate_ndjson(...)` | API payloads, application events, log lines already formatted as JSON. |
 | Python lists of JSON strings | `RuleEngine.evaluate_messages(...)` | Small integrations and local scripts. |
 | PyArrow / Arrow batches | `RuleEngine.evaluate_batch(...)` | Typed pipelines, Parquet/Arrow data, high-throughput paths. |
-| Kafka | `blazerules_io.KafkaConsumer` or `run_stream(...)` | Microbatch consume → evaluate → produce decisions. |
+| Kafka | `blazerules_io.KafkaConsumer` or `run_stream(...)` | Microbatch JSON consume → evaluate → produce decisions. Binary Kafka payloads use `poll_records(...)` plus the Arrow IPC/Avro/Protobuf decoders. |
 | HTTP logs/events | `blazerules_agent --input http` or `instances[].input.type: http` | Apps POST NDJSON to `/v1/logs`. |
 | stdin | `blazerules_agent --input stdin` | Pipe terminal output or process logs into BlazeRules. |
 | File tail | `blazerules_agent --input file_tail --path app.log` | Pod logs, stdout/stderr files, node-local log files. |
@@ -324,6 +324,15 @@ vector_distance: cosine l2 dot
 model_score
 ```
 
+Important operator details:
+
+- `gt_field`, `lt_field`, `gte_field`, and `lte_field` are for numeric fields. `eq_field` and `neq_field` also work for string/categorical/entity equality.
+- String and regex operators require `STRING` fields. `regex` and `not_regex` use RE2 partial matching; use `^...$` for whole-field matches.
+- `model_score.features` and `vector_distance.dims` must be numeric fields. `vector_distance` uses one scalar field per dimension, not one array column. For `metric: cosine`, the computed value is cosine similarity, so `op: gt` means “more similar.”
+- `day_of_week_in` currently uses `0..6`, where `0` is Sunday and `6` is Saturday.
+- `ip_in_subnet`, `ip_not_in_subnet`, and `ipv4_cidr_set` lookups are IPv4-only. IP fields may be dotted strings or numeric IPv4 values.
+- `is_empty` and `is_not_empty` are text-like checks. Closed-enum array operators use the bitset path when enum values are declared in YAML.
+
 ## Nested Records And Arrays Of Objects
 
 Nested JSON:
@@ -412,7 +421,7 @@ risk_bands
 winning_rule_ids
 match_counts
 matched_indices
-timing_ms
+timing
 messages_processed
 messages_skipped
 error_counts
@@ -585,7 +594,7 @@ your own network controls.
 - Batch records; do not call the engine per record.
 - Prefer Arrow when upstream data is already typed.
 - Use `evaluate_ndjson(bytes_blob)` for JSON streams.
-- Use `evaluate_ndjson_padded(...)` or `evaluate_ndjson_file(...)` when input is
+- Use `evaluate_ndjson_padded(payload, logical_size)` or `evaluate_ndjson_file(...)` when input is
   already simdjson-padded or memory-mapped.
 - Keep streaming batches sized for latency, commonly 2K-64K rows.
 - Use larger batches for throughput benchmarks.
