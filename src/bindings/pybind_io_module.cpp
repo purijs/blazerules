@@ -356,7 +356,12 @@ PYBIND11_MODULE(blazerules_io, m) {
         .def_readwrite("flush_timeout_ms", &blazerules_io::StreamRunConfig::flush_timeout_ms)
         .def_readwrite("max_messages", &blazerules_io::StreamRunConfig::max_messages)
         .def_readwrite("max_batches", &blazerules_io::StreamRunConfig::max_batches)
-        .def_readwrite("commit_offsets", &blazerules_io::StreamRunConfig::commit_offsets);
+        .def_readwrite("commit_offsets", &blazerules_io::StreamRunConfig::commit_offsets)
+        .def_readwrite("payload_format", &blazerules_io::StreamRunConfig::payload_format)
+        .def_readwrite("avro_schema_json", &blazerules_io::StreamRunConfig::avro_schema_json)
+        .def_readwrite("protobuf_descriptor_set", &blazerules_io::StreamRunConfig::protobuf_descriptor_set)
+        .def_readwrite("protobuf_message_type", &blazerules_io::StreamRunConfig::protobuf_message_type)
+        .def_readwrite("debezium_op_field", &blazerules_io::StreamRunConfig::debezium_op_field);
 
     py::class_<blazerules_io::StreamRunStats>(m, "StreamRunStats")
         .def_readonly("batches", &blazerules_io::StreamRunStats::batches)
@@ -372,7 +377,7 @@ PYBIND11_MODULE(blazerules_io, m) {
               return blazerules_io::run_stream(engine, config);
           },
           py::arg("engine"), py::arg("config"),
-          "Run a C++-owned Kafka microbatch loop using RuleEngine.evaluate_message_views.");
+          "Run a C++-owned Kafka microbatch loop using JSON, Arrow IPC, Avro, Protobuf, or Debezium payloads.");
     m.attr("has_kafka") = true;
 #else
     m.attr("has_kafka") = false;

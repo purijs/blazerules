@@ -28,13 +28,15 @@ pip install blazerules
 ```
 
 The Python package exposes `blazerules` and `blazerules_io` and installs the
-same local executables shipped in the native archives: `blazerules_agent` and
-`blazerules_dashboard`. It includes the core rule engine, IO helpers, ONNX
-scoring, the local ingest agent, and the local dashboard. `numpy` and `pyarrow`
-are installed as Python dependencies.
+same local executables shipped in the native archives: `blazerules`,
+`blazerules_agent`, and `blazerules_dashboard`. It includes the core rule
+engine, IO helpers, ONNX scoring, the full batch/stream CLI, the local ingest
+agent, and the local dashboard. `numpy` and `pyarrow` are installed as Python
+dependencies.
 
 ```bash
 python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
+blazerules info
 blazerules_agent --help
 blazerules_dashboard --help
 ```
@@ -45,11 +47,47 @@ Native CLI archives are attached to GitHub Releases and are built by GitHub Acti
 - [Linux aarch64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-linux-aarch64.tar.gz)
 - [macOS arm64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-macos-arm64.tar.gz)
 
-These archives include `blazerules_agent` and `blazerules_dashboard`. Release
-binaries and wheels are built with the same feature set: ONNX, IO, Kafka, Avro,
-Protobuf, S3, dashboard, agent, and runtime SIMD dispatch. Linux keeps generic
-code portable and uses runtime-dispatched AVX2/AVX-512 kernels when the host CPU
-supports them; macOS arm64 uses the NEON backend.
+These archives include `blazerules`, `blazerules_agent`, and
+`blazerules_dashboard`. Release binaries and wheels are built with the same
+feature set: ONNX, IO, Kafka, Avro, Protobuf, S3, dashboard, agent, full native
+CLI, and runtime SIMD dispatch. Linux keeps generic code portable and uses
+runtime-dispatched AVX2/AVX-512 kernels when the host CPU supports them; macOS
+arm64 uses the NEON backend.
+
+## Native CLI
+
+Use `blazerules` when you want the same engine and IO stack without writing
+Python:
+
+```bash
+blazerules info
+
+blazerules eval \
+  --rules rules.yaml \
+  --input ndjson \
+  --path events.ndjson \
+  --output grouped-decisions
+
+blazerules eval \
+  --rules rules.yaml \
+  --input arrow-ipc \
+  --path events.arrow \
+  --output summary
+
+blazerules stream kafka \
+  --rules rules.yaml \
+  --brokers localhost:9092 \
+  --input-topic transactions \
+  --output-topic decisions \
+  --format protobuf \
+  --descriptor transaction.desc \
+  --message payments.Transaction
+```
+
+Supported `eval` inputs are `ndjson`, `json`, `json-array`, `debezium`,
+`arrow-ipc`, `parquet`, `csv`, `avro`, and `protobuf`. Python-only in-memory
+objects such as `pyarrow.RecordBatch` map to CLI file/stdin equivalents such as
+Arrow IPC, Parquet, or CSV.
 
 ## What BlazeRules Can Ingest
 
@@ -58,17 +96,17 @@ supports them; macOS arm64 uses the NEON backend.
 | JSON / NDJSON bytes | `RuleEngine.evaluate_ndjson(...)` | API payloads, application events, log lines already formatted as JSON. |
 | Python lists of JSON strings | `RuleEngine.evaluate_messages(...)` | Small integrations and local scripts. |
 | PyArrow / Arrow batches | `RuleEngine.evaluate_batch(...)` | Typed pipelines, Parquet/Arrow data, high-throughput paths. |
-| Kafka | `blazerules_io.KafkaConsumer` or `run_stream(...)` | Microbatch JSON consume → evaluate → produce decisions. Binary Kafka payloads use `poll_records(...)` plus the Arrow IPC/Avro/Protobuf decoders. |
+| Kafka | `blazerules stream kafka`, `blazerules_io.KafkaConsumer`, or `run_stream(...)` | Microbatch JSON, Arrow IPC, Avro, Protobuf, or Debezium consume → evaluate → produce decisions. |
 | HTTP logs/events | `blazerules_agent --input http` or `instances[].input.type: http` | Apps POST NDJSON to `/v1/logs`. |
 | stdin | `blazerules_agent --input stdin` | Pipe terminal output or process logs into BlazeRules. |
 | File tail | `blazerules_agent --input file_tail --path app.log` | Pod logs, stdout/stderr files, node-local log files. |
 | Plain text logs | wrap each line as JSON first | Unstructured terminal/stdout/stderr text. |
 | Kubernetes logs | Helm chart / DaemonSet file-tail mode | Tail `/var/log/containers/...` and write decisions/DLQ. |
-| Debezium CDC | `blazerules_io.unwrap_debezium(...)` | Evaluate database change events. |
-| Arrow IPC | `blazerules_io.ArrowIpcDecoder` | Binary columnar frames. |
-| Avro | `blazerules_io.AvroDecoder` | Schema-based binary events. |
-| Protobuf | `blazerules_io.ProtobufDecoder` | Descriptor-backed binary events. |
-| S3 / local files | `read_ndjson_bytes(...)`, `read_record_batches(...)` | Offline jobs, backtests, lookup/model/rule loading. |
+| Debezium CDC | `blazerules eval --input debezium`, `blazerules_io.unwrap_debezium(...)` | Evaluate database change events. |
+| Arrow IPC | `blazerules eval --input arrow-ipc`, `blazerules_io.ArrowIpcDecoder` | Binary columnar frames. |
+| Avro | `blazerules eval --input avro`, `blazerules_io.AvroDecoder` | Schema-based binary events. |
+| Protobuf | `blazerules eval --input protobuf`, `blazerules_io.ProtobufDecoder` | Descriptor-backed binary events. |
+| S3 / local files | CLI `--path s3://...`, `read_ndjson_bytes(...)`, `read_record_batches(...)` | Offline jobs, backtests, lookup/model/rule loading. |
 
 All paths converge on the same batch evaluation engine. The adapters differ in
 how they collect and decode records; rule execution stays the same.
@@ -552,7 +590,8 @@ The IO module supports:
 - Local and exact-object `s3://` file reads.
 
 Binary decoders produce Arrow `RecordBatch` objects and call `evaluate_batch`;
-they do not need to convert through JSON.
+they do not need to convert through JSON. The same decoder path is available
+through Python and the native `blazerules` CLI.
 
 ## S3 Resources
 
@@ -579,6 +618,12 @@ export BLAZERULES_AWS_ENDPOINT_URL=http://127.0.0.1:9000
 ```
 
 ## Dashboard And Agent
+
+Build the full native CLI bundle:
+
+```bash
+cmake --build cmake-build-release --target blazerules_cli blazerules_agent blazerules_dashboard -j
+```
 
 Dashboard:
 

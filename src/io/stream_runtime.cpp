@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cctype>
 #include <cstdio>
 #include <memory>
 #include <stdexcept>
@@ -13,6 +14,8 @@
 
 #include <librdkafka/rdkafkacpp.h>
 
+#include "blazerules_io/cdc.h"
+#include "blazerules_io/decoder.h"
 #include "blazerules_io/kafka.h"
 
 namespace blazerules_io {
@@ -145,6 +148,55 @@ int emit_decisions(KafkaProducer& producer,
     return emitted;
 }
 
+std::string lower_copy(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    return value;
+}
+
+BatchResult evaluate_stream_batch(RuleEngine& engine,
+                                  const StreamRunConfig& config,
+                                  const std::vector<std::string_view>& views) {
+    const std::string format = lower_copy(config.payload_format);
+    if (format == "json" || format == "ndjson" || format == "jsonl") {
+        return engine.evaluate_message_views(views);
+    }
+    if (format == "debezium") {
+        std::string ndjson = unwrap_debezium(views, config.debezium_op_field);
+        return engine.evaluate_ndjson_padded(ndjson);
+    }
+    if (format == "arrow" || format == "arrow-ipc" || format == "arrow_ipc" ||
+        format == "ipc") {
+        ArrowIpcDecoder decoder;
+        auto batch = decoder.decode_batch(views);
+        return engine.evaluate_batch(batch);
+    }
+    if (format == "avro") {
+#ifdef BLAZERULES_IO_AVRO
+        if (config.avro_schema_json.empty()) {
+            throw std::runtime_error("kafka avro stream requires avro_schema_json");
+        }
+        AvroDecoder decoder(config.avro_schema_json);
+        return engine.evaluate_batch(decoder.decode_batch(views));
+#else
+        throw std::runtime_error("this build does not include Avro support");
+#endif
+    }
+    if (format == "protobuf" || format == "proto") {
+#ifdef BLAZERULES_IO_PROTOBUF
+        if (config.protobuf_descriptor_set.empty() || config.protobuf_message_type.empty()) {
+            throw std::runtime_error(
+                "kafka protobuf stream requires protobuf_descriptor_set and protobuf_message_type");
+        }
+        ProtobufDecoder decoder(config.protobuf_descriptor_set, config.protobuf_message_type);
+        return engine.evaluate_batch(decoder.decode_batch(views));
+#else
+        throw std::runtime_error("this build does not include Protobuf support");
+#endif
+    }
+    throw std::runtime_error("unknown kafka payload format: " + config.payload_format);
+}
+
 }  // namespace
 
 StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config) {
@@ -173,7 +225,7 @@ StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config) {
         if (batch.views.empty()) break;
 
         const auto start = std::chrono::steady_clock::now();
-        BatchResult result = engine.evaluate_message_views(batch.views);
+        BatchResult result = evaluate_stream_batch(engine, config, batch.views);
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count();
 

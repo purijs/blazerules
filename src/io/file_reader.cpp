@@ -145,7 +145,7 @@ std::vector<std::shared_ptr<arrow::RecordBatch>> read_json_batches(
 FileFormat parse_file_format(const std::string& format) {
     const std::string f = lower_copy(format);
     if (f.empty() || f == "auto") return FileFormat::AUTO;
-    if (f == "arrow" || f == "arrow_ipc" || f == "ipc" || f == "feather") {
+    if (f == "arrow" || f == "arrow_ipc" || f == "arrow-ipc" || f == "ipc" || f == "feather") {
         return FileFormat::ARROWIPC;
     }
     if (f == "parquet" || f == "pq") return FileFormat::PARQUET;

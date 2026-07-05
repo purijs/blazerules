@@ -110,13 +110,14 @@ jobs:
         shell: bash
         run: |
           cmake --build build-release --target \
-            blazerules_agent blazerules_dashboard -j
+            blazerules_cli blazerules_agent blazerules_dashboard -j
 
       - name: Package archive
         shell: bash
         run: |
           rm -rf package
           mkdir -p package/bin
+          cp build-release/blazerules package/bin/
           cp build-release/blazerules_agent package/bin/
           cp build-release/blazerules_dashboard package/bin/
           cp README.md LICENSE TRADEMARKS.md package/
@@ -124,8 +125,11 @@ jobs:
             echo "BlazeRules ${GITHUB_REF_NAME:-manual}"
             echo "Platform: ${{ matrix.name }}"
             echo "Built by: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo "Features: ONNX, IO, Kafka, Avro, Protobuf, S3, dashboard, agent, runtime SIMD dispatch"
+            echo "Features: core CLI, ONNX, IO, Kafka, Avro, Protobuf, S3, dashboard, agent, runtime SIMD dispatch"
           } > package/VERSION.txt
+          package/bin/blazerules info
+          package/bin/blazerules_agent --help >/dev/null
+          package/bin/blazerules_dashboard --help >/dev/null
           tar -C package -czf "${{ matrix.asset }}" .
 
       - uses: actions/upload-artifact@v4

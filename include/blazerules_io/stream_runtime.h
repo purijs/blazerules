@@ -25,6 +25,11 @@ struct StreamRunConfig {
     int64_t max_messages = 0;
     int64_t max_batches = 0;
     bool commit_offsets = true;
+    std::string payload_format = "json";
+    std::string avro_schema_json;
+    std::string protobuf_descriptor_set;
+    std::string protobuf_message_type;
+    std::string debezium_op_field = "__op";
 };
 
 struct StreamRunStats {
