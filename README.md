@@ -158,7 +158,6 @@ Start here:
 - [Python API](https://blazerules.readme.io/docs/python-api)
 - [API and CLI Values Reference](https://blazerules.readme.io/docs/api-cli-values-reference)
 - [Production YAML Guide](https://blazerules.readme.io/docs/production-yaml-guide)
-- [Licensing](https://blazerules.readme.io/docs/licensing)
 - [Build, C++ And Platforms](https://blazerules.readme.io/docs/build-cpp-platforms)
 
 ## Build From Source
@@ -614,5 +613,4 @@ your own network controls.
 
 BlazeRules is licensed under the Apache License 2.0.
 
-See [LICENSE](LICENSE), [TRADEMARKS.md](TRADEMARKS.md), and
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+See [LICENSE](LICENSE) and [TRADEMARKS.md](TRADEMARKS.md).

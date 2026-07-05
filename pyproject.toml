@@ -55,8 +55,6 @@ sdist.include = [
   "CMakePresets.json",
   "LICENSE",
   "TRADEMARKS.md",
-  "THIRD_PARTY_NOTICES.md",
-  "CONTRIBUTING.md",
   "README.md",
   "include/**",
   "src/**",
