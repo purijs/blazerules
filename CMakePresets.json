@@ -184,7 +184,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -195,7 +194,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -206,7 +204,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -217,7 +214,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -228,7 +224,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -239,7 +234,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -250,7 +244,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -261,7 +254,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]
@@ -272,7 +264,6 @@
       "targets": [
         "blazerules_core",
         "blazerules",
-        "blazerules_driver",
         "blazerules_dashboard",
         "blazerules_agent"
       ]

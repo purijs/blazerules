@@ -3,7 +3,7 @@
 
 namespace blazerules {
 
-inline constexpr const char* VERSION = "0.3.1";
+inline constexpr const char* VERSION = "0.3.2";
 inline constexpr const char* RULE_YAML_COMPATIBILITY = "2.x";
 
 } // namespace blazerules

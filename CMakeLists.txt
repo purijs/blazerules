@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 if(DEFINED ENV{VCPKG_ROOT} AND NOT CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE PATH "")
 endif()
-project(blazerules VERSION 0.3.1 LANGUAGES CXX)
+project(blazerules VERSION 0.3.2 LANGUAGES CXX)
 include(CheckCXXCompilerFlag)
 include(CheckIPOSupported)
 
@@ -68,7 +68,24 @@ find_package(re2 CONFIG REQUIRED)
 # wheel interpreter.
 if(SKBUILD)
     set(PYBIND11_FINDPYTHON ON)
-    find_package(pybind11 CONFIG REQUIRED)
+    if(NOT Python_EXECUTABLE AND DEFINED PYTHON_EXECUTABLE)
+        set(Python_EXECUTABLE "${PYTHON_EXECUTABLE}")
+    endif()
+    if(NOT Python_EXECUTABLE)
+        find_package(Python COMPONENTS Interpreter REQUIRED)
+    endif()
+    execute_process(
+            COMMAND "${Python_EXECUTABLE}" -m pybind11 --cmakedir
+            OUTPUT_VARIABLE BLAZERULES_PYBIND11_CMAKEDIR
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET)
+    if(BLAZERULES_PYBIND11_CMAKEDIR)
+        find_package(pybind11 CONFIG REQUIRED
+                PATHS "${BLAZERULES_PYBIND11_CMAKEDIR}"
+                NO_DEFAULT_PATH)
+    else()
+        find_package(pybind11 CONFIG REQUIRED)
+    endif()
 endif()
 
 add_library(blazerules_core STATIC
