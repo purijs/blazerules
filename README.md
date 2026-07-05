@@ -27,20 +27,29 @@ or dead-letter records.
 pip install blazerules
 ```
 
-The Python package exposes `blazerules` and `blazerules_io`. It includes the
-core rule engine, IO helpers, ONNX scoring, the local ingest agent, and the local
-dashboard. `numpy` and `pyarrow` are installed as Python dependencies.
+The Python package exposes `blazerules` and `blazerules_io` and installs the
+same local executables shipped in the native archives: `blazerules_agent` and
+`blazerules_dashboard`. It includes the core rule engine, IO helpers, ONNX
+scoring, the local ingest agent, and the local dashboard. `numpy` and `pyarrow`
+are installed as Python dependencies.
 
 ```bash
 python -c "import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())"
+blazerules_agent --help
+blazerules_dashboard --help
 ```
 
 Native CLI archives are attached to GitHub Releases and are built by GitHub Actions from the tagged source revision:
 
 - [Linux x86_64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-linux-x86_64.tar.gz)
+- [Linux aarch64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-linux-aarch64.tar.gz)
 - [macOS arm64](https://github.com/purijs/blazerules/releases/latest/download/blazerules-macos-arm64.tar.gz)
 
-These archives include `blazerules_driver`, `blazerules_agent`, and `blazerules_dashboard`. Release binaries use full feature flags. Linux keeps generic code portable and uses runtime-dispatched AVX2/AVX-512 kernels when the host CPU supports them; macOS arm64 uses the NEON backend.
+These archives include `blazerules_agent` and `blazerules_dashboard`. Release
+binaries and wheels are built with the same feature set: ONNX, IO, Kafka, Avro,
+Protobuf, S3, dashboard, agent, and runtime SIMD dispatch. Linux keeps generic
+code portable and uses runtime-dispatched AVX2/AVX-512 kernels when the host CPU
+supports them; macOS arm64 uses the NEON backend.
 
 ## What BlazeRules Can Ingest
 

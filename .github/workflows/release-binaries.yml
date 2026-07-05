@@ -110,17 +110,16 @@ jobs:
         shell: bash
         run: |
           cmake --build build-release --target \
-            blazerules_driver blazerules_agent blazerules_dashboard -j
+            blazerules_agent blazerules_dashboard -j
 
       - name: Package archive
         shell: bash
         run: |
           rm -rf package
           mkdir -p package/bin
-          cp build-release/blazerules_driver package/bin/
           cp build-release/blazerules_agent package/bin/
           cp build-release/blazerules_dashboard package/bin/
-          cp README.md LICENSE THIRD_PARTY_NOTICES.md package/
+          cp README.md LICENSE TRADEMARKS.md package/
           {
             echo "BlazeRules ${GITHUB_REF_NAME:-manual}"
             echo "Platform: ${{ matrix.name }}"

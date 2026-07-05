@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "blazerules"
-version = "0.2.1"
+version = "0.3.0"
 description = "Batch-first C++20 vectorized decision engine with Python bindings"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -78,4 +78,4 @@ sdist.exclude = [
 build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux*"
 test-requires = ["numpy", "pyarrow"]
-test-command = "python -c \"import blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend())\""
+test-command = "python -c \"import shutil, subprocess, blazerules, blazerules_io; print(blazerules.__version__, blazerules.simd_backend()); assert shutil.which('blazerules_agent'); assert shutil.which('blazerules_dashboard'); subprocess.run(['blazerules_agent', '--help'], check=True, stdout=subprocess.PIPE); subprocess.run(['blazerules_dashboard', '--help'], check=True, stdout=subprocess.PIPE)\""
