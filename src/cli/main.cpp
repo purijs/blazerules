@@ -13,6 +13,12 @@
 #include <vector>
 
 #include <simdjson.h>
+#include <yaml-cpp/yaml.h>
+
+#include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <arrow/io/stdio.h>
+#include <arrow/ipc/writer.h>
 
 #include "blazerules/engine.h"
 #include "blazerules/resource_resolver.h"
@@ -35,6 +41,8 @@ struct Options {
     std::map<std::string, std::string> values;
     std::vector<std::string> models;
     std::vector<std::string> paths;
+    std::vector<std::string> consumer_conf;
+    std::vector<std::string> producer_conf;
     std::vector<std::string> positionals;
     bool use_stdin = false;
 };
@@ -85,6 +93,10 @@ Options parse_options(int argc, char** argv, int start) {
         } else if (key == "path") {
             opts.paths.push_back(value);
             opts.values[key] = value;
+        } else if (key == "consumer-conf") {
+            opts.consumer_conf.push_back(value);
+        } else if (key == "producer-conf") {
+            opts.producer_conf.push_back(value);
         } else {
             opts.values[key] = value;
         }
@@ -197,6 +209,114 @@ void apply_aws_options(const Options& opts) {
     }
 }
 
+std::map<std::string, std::string> parse_kv_list(const std::vector<std::string>& items,
+                                                 const char* what) {
+    std::map<std::string, std::string> out;
+    for (const std::string& item : items) {
+        const size_t eq = item.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            throw CliError(std::string(what) + " must be key=value: " + item);
+        }
+        out[item.substr(0, eq)] = item.substr(eq + 1);
+    }
+    return out;
+}
+
+void set_if_absent(Options& opts, const std::string& key, const YAML::Node& node) {
+    if (node && node.IsScalar() && !has(opts, key)) {
+        opts.values[key] = node.as<std::string>();
+    }
+}
+
+void set_list_or_scalar_if_absent(Options& opts, const std::string& key,
+                                  const YAML::Node& node) {
+    if (!node || has(opts, key)) return;
+    if (node.IsScalar()) {
+        opts.values[key] = node.as<std::string>();
+        return;
+    }
+    if (!node.IsSequence()) return;
+    std::string joined;
+    for (const auto& item : node) {
+        if (!item.IsScalar()) continue;
+        if (!joined.empty()) joined.push_back(',');
+        joined += item.as<std::string>();
+    }
+    if (!joined.empty()) opts.values[key] = joined;
+}
+
+void append_kv_map(std::vector<std::string>& dst, const YAML::Node& node) {
+    if (!node || !node.IsMap() || !dst.empty()) return;
+    for (const auto& item : node) {
+        if (!item.first.IsScalar() || !item.second.IsScalar()) continue;
+        dst.push_back(item.first.as<std::string>() + "=" + item.second.as<std::string>());
+    }
+}
+
+void load_config_into_options(Options& opts, const std::string& path) {
+    YAML::Node root = YAML::LoadFile(blazerules::resolve_resource_to_local(path));
+
+    set_if_absent(opts, "rules", root["rules"]);
+
+    if (YAML::Node in = root["input"]) {
+        set_if_absent(opts, "input", in["type"]);
+        set_if_absent(opts, "format", in["format"]);
+        set_if_absent(opts, "brokers", in["brokers"]);
+        set_if_absent(opts, "input-topic", in["topic"]);
+        set_list_or_scalar_if_absent(opts, "input-topic", in["topics"]);
+        set_if_absent(opts, "group-id", in["group_id"]);
+        append_kv_map(opts.consumer_conf, in["consumer_conf"]);
+        append_kv_map(opts.producer_conf, in["producer_conf"]);
+        if (in["path"] && in["path"].IsScalar() && !has(opts, "path")) {
+            const std::string p = in["path"].as<std::string>();
+            opts.paths.push_back(p);
+            opts.values["path"] = p;
+        }
+        set_if_absent(opts, "schema", in["schema"]);
+        set_if_absent(opts, "descriptor", in["descriptor"]);
+        set_if_absent(opts, "message", in["message"]);
+        set_if_absent(opts, "op-field", in["op_field"]);
+    }
+
+    if (YAML::Node out = root["output"]) {
+        set_if_absent(opts, "output-topic", out["topic"]);
+        set_if_absent(opts, "dlq-topic", out["dlq_topic"]);
+        set_if_absent(opts, "output-path", out["path"]);
+        set_if_absent(opts, "output", out["mode"]);
+        set_if_absent(opts, "decision-log", out["decision_log"]);
+        set_if_absent(opts, "dead-letter-log", out["dead_letter_log"]);
+        append_kv_map(opts.producer_conf, out["producer_conf"]);
+    }
+
+    if (YAML::Node eng = root["engine"]) {
+        set_if_absent(opts, "batch-size", eng["batch_size"]);
+        set_if_absent(opts, "threads", eng["threads"]);
+        set_if_absent(opts, "output-detail", eng["output_detail"]);
+        set_if_absent(opts, "simd-backend", eng["simd_backend"]);
+        set_if_absent(opts, "ingest-error-mode", eng["ingest_error_mode"]);
+        set_if_absent(opts, "type-mismatch-mode", eng["type_mismatch_mode"]);
+    }
+
+    if (YAML::Node models = root["models"]; models && models.IsSequence() && opts.models.empty()) {
+        for (const auto& m : models) {
+            if (m["name"] && m["path"]) {
+                opts.models.push_back(m["name"].as<std::string>() + "=" +
+                                      m["path"].as<std::string>());
+            }
+        }
+    }
+
+    if (YAML::Node aws = root["aws"]) {
+        set_if_absent(opts, "aws-profile", aws["profile"]);
+        set_if_absent(opts, "aws-region", aws["region"]);
+        set_if_absent(opts, "aws-endpoint-url", aws["endpoint_url"]);
+    }
+}
+
+void maybe_load_config(Options& opts) {
+    if (has(opts, "config")) load_config_into_options(opts, get(opts, "config"));
+}
+
 EngineConfig make_engine_config(const Options& opts) {
     EngineConfig config;
     config.batch_size = get_int(opts, "batch-size", config.batch_size);
@@ -247,6 +367,14 @@ struct EvalTotals {
     std::map<std::string, int64_t> rule_counts;
     std::map<std::string, int64_t> error_counts;
     std::map<std::string, std::vector<int32_t>> grouped_decisions;
+
+    bool collect_rows = false;
+    std::vector<int32_t> row_index;
+    std::vector<bool> row_matched;
+    std::vector<std::string> row_decision;
+    std::vector<double> row_score;
+    std::vector<std::string> row_risk_band;
+    std::vector<std::string> row_winning_rule_id;
 };
 
 void add_timing(BatchResult::Timing& dst, const BatchResult::Timing& src) {
@@ -275,6 +403,22 @@ void add_result(EvalTotals& totals, const BatchResult& result, int32_t row_offse
         auto& out = totals.grouped_decisions[decision];
         out.reserve(out.size() + indices.size());
         for (int32_t idx : indices) out.push_back(row_offset + idx);
+    }
+    if (totals.collect_rows) {
+        size_t matched_pos = 0;
+        for (int row = 0; row < result.n_records; ++row) {
+            const bool matched = matched_pos < result.matched_record_indices.size() &&
+                                 result.matched_record_indices[matched_pos] == row;
+            if (matched) ++matched_pos;
+            const auto r = static_cast<size_t>(row);
+            totals.row_index.push_back(row_offset + row);
+            totals.row_matched.push_back(matched);
+            totals.row_decision.push_back(r < result.decisions.size() ? result.decisions[r] : "");
+            totals.row_score.push_back(r < result.scores.size() ? result.scores[r] : 0.0);
+            totals.row_risk_band.push_back(r < result.risk_bands.size() ? result.risk_bands[r] : "");
+            totals.row_winning_rule_id.push_back(
+                r < result.winning_rule_ids.size() ? result.winning_rule_ids[r] : "");
+        }
     }
 }
 
@@ -389,6 +533,61 @@ void write_summary(const EvalTotals& totals, std::ostream& out) {
     out << "}}\n";
 }
 
+void check_arrow(const arrow::Status& status, const char* what) {
+    if (!status.ok()) throw CliError(std::string(what) + ": " + status.ToString());
+}
+
+void write_arrow_ipc(const EvalTotals& totals, const std::string& output_path) {
+    arrow::Int32Builder row_b;
+    arrow::BooleanBuilder matched_b;
+    arrow::StringBuilder decision_b;
+    arrow::DoubleBuilder score_b;
+    arrow::StringBuilder band_b;
+    arrow::StringBuilder winning_b;
+    const int64_t n = static_cast<int64_t>(totals.row_index.size());
+    check_arrow(row_b.AppendValues(totals.row_index), "arrow build row");
+    for (int i = 0; i < n; ++i) {
+        check_arrow(matched_b.Append(totals.row_matched[static_cast<size_t>(i)]), "arrow build matched");
+    }
+    check_arrow(decision_b.AppendValues(totals.row_decision), "arrow build decision");
+    check_arrow(score_b.AppendValues(totals.row_score), "arrow build score");
+    check_arrow(band_b.AppendValues(totals.row_risk_band), "arrow build risk_band");
+    check_arrow(winning_b.AppendValues(totals.row_winning_rule_id), "arrow build winning_rule_id");
+
+    std::vector<std::shared_ptr<arrow::Array>> arrays(6);
+    check_arrow(row_b.Finish(&arrays[0]), "arrow finish row");
+    check_arrow(matched_b.Finish(&arrays[1]), "arrow finish matched");
+    check_arrow(decision_b.Finish(&arrays[2]), "arrow finish decision");
+    check_arrow(score_b.Finish(&arrays[3]), "arrow finish score");
+    check_arrow(band_b.Finish(&arrays[4]), "arrow finish risk_band");
+    check_arrow(winning_b.Finish(&arrays[5]), "arrow finish winning_rule_id");
+
+    auto schema = arrow::schema({
+        arrow::field("row", arrow::int32()),
+        arrow::field("matched", arrow::boolean()),
+        arrow::field("decision", arrow::utf8()),
+        arrow::field("score", arrow::float64()),
+        arrow::field("risk_band", arrow::utf8()),
+        arrow::field("winning_rule_id", arrow::utf8()),
+    });
+    auto batch = arrow::RecordBatch::Make(schema, n, arrays);
+
+    std::shared_ptr<arrow::io::OutputStream> sink;
+    if (output_path.empty()) {
+        sink = std::make_shared<arrow::io::StdoutStream>();
+    } else {
+        auto sink_res = arrow::io::FileOutputStream::Open(output_path);
+        check_arrow(sink_res.status(), "open arrow output");
+        sink = *sink_res;
+    }
+    auto writer_res = arrow::ipc::MakeStreamWriter(sink, schema);
+    check_arrow(writer_res.status(), "make arrow ipc writer");
+    auto writer = *writer_res;
+    check_arrow(writer->WriteRecordBatch(*batch), "write arrow ipc batch");
+    check_arrow(writer->Close(), "close arrow ipc writer");
+    check_arrow(sink->Close(), "close arrow output");
+}
+
 using BatchHandler = void (*)(const BatchResult&, int, std::ostream&);
 
 EvalTotals evaluate_batches(RuleEngine& engine,
@@ -396,6 +595,7 @@ EvalTotals evaluate_batches(RuleEngine& engine,
                             const std::string& output,
                             std::ostream& out) {
     EvalTotals totals;
+    totals.collect_rows = (output == "arrow-ipc");
     int32_t row_offset = 0;
     int batch_index = 0;
     for (const auto& batch : batches) {
@@ -412,6 +612,7 @@ EvalTotals evaluate_batches(RuleEngine& engine,
 EvalTotals evaluate_ndjson(RuleEngine& engine, std::string_view bytes,
                            const std::string& output, std::ostream& out) {
     EvalTotals totals;
+    totals.collect_rows = (output == "arrow-ipc");
     BatchResult result = engine.evaluate_ndjson_padded(bytes);
     if (output == "decisions-jsonl") write_decisions_jsonl(result, 0, out);
     if (output == "bitmasks") write_bitmasks(result, 0, out);
@@ -459,34 +660,39 @@ int command_info() {
     return 0;
 }
 
-int command_eval(const Options& opts) {
+int command_eval(Options opts) {
     if (wants_help(opts)) {
         std::cout
             << "Usage: blazerules eval --rules rules.yaml --input FORMAT --path DATA [flags]\n\n"
             << "Inputs:\n"
-            << "  ndjson, json, json-array, debezium, arrow-ipc, parquet, csv, avro, protobuf, auto\n\n"
+            << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv, avro, protobuf, auto\n\n"
             << "Output modes:\n"
-            << "  summary, decisions-jsonl, grouped-decisions, rule-counts, bitmasks\n\n"
+            << "  summary, decisions-jsonl, grouped-decisions, rule-counts, bitmasks, arrow-ipc\n\n"
             << "Format-specific flags:\n"
             << "  --schema PATH                 Avro schema JSON\n"
             << "  --descriptor PATH             Protobuf FileDescriptorSet\n"
             << "  --message TYPE                Protobuf message type\n"
             << "  --op-field FIELD              Debezium operation field, default __op\n\n"
             << "Runtime flags:\n"
+            << "  --config PATH                 Load a unified run config (flags override it)\n"
             << "  --batch-size N --threads N --model name=PATH --output-path PATH\n"
+            << "  --output-detail decisions|bitmasks --ingest-error-mode M --type-mismatch-mode M\n"
             << "  --decision-log PATH --dead-letter-log PATH --simd-backend auto|scalar|neon|avx2|avx512\n";
         return 0;
     }
+    maybe_load_config(opts);
     apply_aws_options(opts);
     EngineConfig config = make_engine_config(opts);
-    const std::string output = lower_copy(get(opts, "output", "summary"));
+    const std::string output =
+        lower_copy(get(opts, "output", has(opts, "output-path") ? "decisions-jsonl" : "summary"));
     if (output == "bitmasks") config.output_detail = EngineConfig::OUTPUT_BITMASKS;
     RuleEngine engine(config);
     register_models(engine, opts);
     load_rules(engine, opts);
 
     std::ofstream out_file;
-    std::ostream& out = output_stream(opts, out_file);
+    std::ostringstream discard;
+    std::ostream& out = (output == "arrow-ipc") ? discard : output_stream(opts, out_file);
 
     const std::string input = lower_copy(get(opts, "input", get(opts, "format", "auto")));
     const std::string path = get(opts, "path");
@@ -553,32 +759,55 @@ int command_eval(const Options& opts) {
     if (output == "summary") write_summary(totals, out);
     if (output == "grouped-decisions") write_grouped_decisions(totals, out);
     if (output == "rule-counts") write_rule_counts(totals, out);
+    if (output == "arrow-ipc") write_arrow_ipc(totals, get(opts, "output-path"));
     return 0;
 }
 
-int command_validate(const Options& opts) {
+int command_validate(Options opts) {
     if (wants_help(opts)) {
-        std::cout << "Usage: blazerules validate --rules rules.yaml [--model name=PATH]\n";
+        std::cout << "Usage: blazerules validate --rules rules.yaml [--model name=PATH] "
+                     "[--sample sample.ndjson] [--config PATH]\n";
         return 0;
     }
+    maybe_load_config(opts);
     apply_aws_options(opts);
     RuleEngine engine(make_engine_config(opts));
     register_models(engine, opts);
     auto report = engine.load_rules(get(opts, "rules"));
+    int64_t sample_records = -1;
+    int64_t sample_skipped = -1;
+    const std::string sample = get(opts, "sample");
+    if (!sample.empty()) {
+        std::string bytes = blazerules_io::read_ndjson_bytes(sample);
+        BatchResult result = engine.evaluate_ndjson_padded(bytes);
+        sample_records = result.n_records;
+        sample_skipped = result.messages_skipped;
+    }
     std::cout << "{\"ok\":true,\"ruleset_version\":\""
               << json_escape(engine.active_rule_set_version())
               << "\",\"conflicts\":" << report.conflicts.size()
               << ",\"subsumptions\":" << report.subsumptions.size()
-              << ",\"dead_rules\":" << report.dead_rules.size() << "}\n";
+              << ",\"dead_rules\":" << report.dead_rules.size();
+    if (sample_records >= 0) {
+        std::cout << ",\"sample_records\":" << sample_records
+                  << ",\"sample_skipped\":" << sample_skipped;
+    }
+    std::cout << "}\n";
     return 0;
 }
 
-int command_backtest(const Options& opts) {
+int command_backtest(Options opts) {
     if (wants_help(opts)) {
         std::cout
-            << "Usage: blazerules backtest --rules-a old.yaml --rules-b new.yaml --path data.parquet [--path more.parquet]\n";
+            << "Usage: blazerules backtest --rules-a old.yaml --rules-b new.yaml --path data.parquet [--path more.parquet]\n\n"
+            << "Flags:\n"
+            << "  --rules-a PATH --rules-b PATH   rulesets to compare (required)\n"
+            << "  --path PATH|s3://...            Parquet history, repeatable (required)\n"
+            << "  --label-column NAME             ground-truth column; adds precision/recall to the report\n"
+            << "  --batch-size N --model name=PATH --config PATH\n";
         return 0;
     }
+    maybe_load_config(opts);
     apply_aws_options(opts);
     RuleEngine engine(make_engine_config(opts));
     register_models(engine, opts);
@@ -598,11 +827,18 @@ int command_backtest(const Options& opts) {
               << ",\"fire_rate_b\":" << report.fire_rate_b
               << ",\"new_positives\":" << report.new_positives
               << ",\"lost_positives\":" << report.lost_positives
-              << ",\"agreement_rate\":" << report.agreement_rate << "}\n";
+              << ",\"agreement_rate\":" << report.agreement_rate;
+    if (!config.label_column.empty()) {
+        std::cout << ",\"precision_a\":" << report.precision_a
+                  << ",\"recall_a\":" << report.recall_a
+                  << ",\"precision_b\":" << report.precision_b
+                  << ",\"recall_b\":" << report.recall_b;
+    }
+    std::cout << "}\n";
     return 0;
 }
 
-int command_stream_kafka(const Options& opts) {
+int command_stream_kafka(Options opts) {
 #ifdef BLAZERULES_IO_KAFKA
     if (wants_help(opts)) {
         std::cout
@@ -610,8 +846,11 @@ int command_stream_kafka(const Options& opts) {
             << "Payload formats:\n"
             << "  json, ndjson, debezium, arrow-ipc, avro, protobuf\n\n"
             << "Kafka flags:\n"
-            << "  --group-id ID --output-topic TOPIC --batch-size N --max-messages N --max-batches N\n"
-            << "  --poll-timeout-ms N --flush-timeout-ms N --commit-offsets true|false\n\n"
+            << "  --group-id ID --output-topic TOPIC --dlq-topic TOPIC --batch-size N\n"
+            << "  --max-messages N --max-batches N --poll-timeout-ms N --flush-timeout-ms N\n"
+            << "  --commit-offsets true|false --model name=PATH --config PATH\n"
+            << "  --consumer-conf k=v            librdkafka consumer setting, repeatable (e.g. SASL/SSL)\n"
+            << "  --producer-conf k=v            librdkafka producer setting, repeatable\n\n"
             << "Format flags:\n"
             << "  --schema PATH                 Avro schema JSON\n"
             << "  --descriptor PATH             Protobuf FileDescriptorSet\n"
@@ -619,6 +858,7 @@ int command_stream_kafka(const Options& opts) {
             << "  --op-field FIELD              Debezium operation field, default __op\n";
         return 0;
     }
+    maybe_load_config(opts);
     apply_aws_options(opts);
     RuleEngine engine(make_engine_config(opts));
     register_models(engine, opts);
@@ -629,6 +869,9 @@ int command_stream_kafka(const Options& opts) {
     config.group_id = get(opts, "group-id", "blazerules");
     config.input_topics = split_csv(get(opts, "input-topic", get(opts, "input-topics")));
     config.output_topic = get(opts, "output-topic");
+    config.dlq_topic = get(opts, "dlq-topic");
+    config.consumer_conf = parse_kv_list(opts.consumer_conf, "--consumer-conf");
+    config.producer_conf = parse_kv_list(opts.producer_conf, "--producer-conf");
     config.batch_size = get_int(opts, "batch-size", config.batch_size);
     config.poll_timeout_ms = get_int(opts, "poll-timeout-ms", config.poll_timeout_ms);
     config.flush_timeout_ms = get_int(opts, "flush-timeout-ms", config.flush_timeout_ms);
@@ -649,6 +892,7 @@ int command_stream_kafka(const Options& opts) {
               << ",\"matched\":" << stats.matched
               << ",\"emitted\":" << stats.emitted
               << ",\"eval_ms\":" << stats.eval_us / 1000.0
+              << ",\"dlq_routed\":" << stats.dlq_routed
               << ",\"delivery_errors\":" << stats.delivery_errors << "}\n";
     return 0;
 #else
@@ -667,14 +911,15 @@ void print_help() {
         << "  blazerules backtest --rules-a old.yaml --rules-b new.yaml --path data.parquet\n"
         << "  blazerules stream kafka --rules rules.yaml --brokers HOST --input-topic TOPIC\n\n"
         << "Eval inputs:\n"
-        << "  ndjson, json, json-array, debezium, arrow-ipc, parquet, csv, avro, protobuf\n\n"
+        << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv, avro, protobuf, auto\n\n"
         << "Common flags:\n"
         << "  --rules PATH|s3://...        Rules YAML\n"
         << "  --path PATH|s3://...         Input file\n"
         << "  --stdin                      Read NDJSON/JSON from stdin\n"
+        << "  --config PATH                Unified run config (flags override it)\n"
         << "  --batch-size N               Batch size for file/batch inputs\n"
         << "  --model name=PATH            Register ONNX model, repeatable\n"
-        << "  --output summary|decisions-jsonl|grouped-decisions|rule-counts|bitmasks\n"
+        << "  --output summary|decisions-jsonl|grouped-decisions|rule-counts|bitmasks|arrow-ipc\n"
         << "  --output-path PATH           Write output to file\n"
         << "  --aws-profile PROFILE        AWS profile for s3:// resources\n"
         << "  --aws-region REGION          AWS region\n"

@@ -989,7 +989,7 @@ void BatchTransposer::append_json_object_fields(simdjson::ondemand::object& obje
 }
 
 template <typename DocumentLike>
-void BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
+bool BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
     struct ColumnSnapshot {
         int col_index = -1;
         int64_t length = 0;
@@ -1046,7 +1046,7 @@ void BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
     simdjson::ondemand::object object;
     if (doc.get_object().get(object)) {
         abort_malformed_row("malformed json object", "json");
-        return;
+        return false;
     }
 
     bool learning_order = learned_field_order_.empty();
@@ -1059,7 +1059,7 @@ void BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
             simdjson::ondemand::field field;
             if (std::move(field_result).get(field)) {
                 abort_malformed_row("malformed json field", "json");
-                return;
+                return false;
             }
             std::string_view key = field.escaped_key();
             int col_index;
@@ -1093,7 +1093,7 @@ void BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
             row_generation_ = 1;
         }
         ++input_row_index_;
-        return;
+        return true;
     }
 
     std::vector<int> learned_this_doc;
@@ -1108,7 +1108,7 @@ void BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
         simdjson::ondemand::field field;
         if (std::move(field_result).get(field)) {
             abort_malformed_row("malformed json field", "json");
-            return;
+            return false;
         }
         std::string_view key = field.escaped_key();
         simdjson::ondemand::value value = field.value();
@@ -1167,11 +1167,12 @@ void BatchTransposer::append_json_document_single_pass(DocumentLike& doc) {
         row_generation_ = 1;
     }
     ++input_row_index_;
+    return true;
 }
 
 template <typename DocumentLike>
-void BatchTransposer::append_json_document(DocumentLike& doc) {
-    append_json_document_single_pass(doc);
+bool BatchTransposer::append_json_document(DocumentLike& doc) {
+    return append_json_document_single_pass(doc);
 }
 
 void BatchTransposer::add_json_message(std::string_view json_bytes) {
@@ -1215,23 +1216,52 @@ void BatchTransposer::add_ndjson_padded(std::string_view ndjson_bytes, int threa
 }
 
 void BatchTransposer::parse_ndjson_view(std::string_view ndjson_bytes) {
+    int64_t skip_lines = 0;
+    if (parse_ndjson_stream_fast(ndjson_bytes, skip_lines)) return;
+    parse_ndjson_lines_safe(ndjson_bytes, skip_lines);
+}
+
+bool BatchTransposer::parse_ndjson_stream_fast(std::string_view ndjson_bytes,
+                                               int64_t& skip_lines) {
+    skip_lines = 0;
     simdjson::ondemand::document_stream docs;
     if (parser_.iterate_many(ndjson_bytes.data(), ndjson_bytes.size(),
                              simdjson::ondemand::DEFAULT_BATCH_SIZE).get(docs)) {
-        record_error("MALFORMED_JSON", "malformed ndjson", "ndjson",
-                     input_row_index_, {}, true);
-        return;
+        return false;  // reparse the whole buffer safely (skip_lines = 0)
     }
-
-    for (auto doc_result : docs) {
+    int64_t appended = 0;
+    for (auto it = docs.begin(); it != docs.end(); ++it) {
         simdjson::ondemand::document_reference doc;
-        if (std::move(doc_result).get(doc)) {
-            record_error("MALFORMED_JSON", "malformed json", "ndjson",
-                         input_row_index_, {}, true);
-            ++input_row_index_;
-            continue;
+        if ((*it).get(doc)) {
+            skip_lines = appended;
+            return false;
         }
-        append_json_document(doc);
+        if (!append_json_document(doc)) {
+            skip_lines = appended + 1;
+            return false;
+        }
+        ++appended;
+    }
+    return true;
+}
+
+void BatchTransposer::parse_ndjson_lines_safe(std::string_view ndjson_bytes,
+                                              int64_t skip_lines) {
+    size_t pos = 0;
+    const size_t n = ndjson_bytes.size();
+    int64_t skipped = 0;
+    while (pos < n) {
+        const size_t nl = ndjson_bytes.find('\n', pos);
+        const size_t end = (nl == std::string_view::npos) ? n : nl;
+        std::string_view line = ndjson_bytes.substr(pos, end - pos);
+        pos = (nl == std::string_view::npos) ? n : nl + 1;
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' ||
+                                 line.back() == '\t')) {
+            line.remove_suffix(1);
+        }
+        if (line.empty()) continue;
+        if (skipped < skip_lines) { ++skipped; continue; }
+        add_json_message(line);
     }
 }
 
@@ -1257,7 +1287,7 @@ void BatchTransposer::learn_field_order_from_ndjson(std::string_view ndjson_byte
         bool any_object = false;
         for (auto field_result : object) {
             simdjson::ondemand::field field;
-            if (std::move(field_result).get(field)) continue;
+            if (std::move(field_result).get(field)) return;
             std::string_view key = field.escaped_key();
             auto it = field_to_index_.find(key);
             learned.push_back(it == field_to_index_.end() ? -1 : it->second);

@@ -17,6 +17,7 @@ struct StreamRunConfig {
     std::string group_id;
     std::vector<std::string> input_topics;
     std::string output_topic;
+    std::string dlq_topic;
     std::map<std::string, std::string> consumer_conf;
     std::map<std::string, std::string> producer_conf;
     int batch_size = 2048;
@@ -39,6 +40,7 @@ struct StreamRunStats {
     int64_t emitted = 0;
     int64_t eval_us = 0;
     int64_t delivery_errors = 0;
+    int64_t dlq_routed = 0;
 };
 
 StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config);

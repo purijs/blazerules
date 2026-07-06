@@ -58,9 +58,9 @@ private:
     bool should_materialize(int col_index) const;
     void rebuild_projected_indices();
     template <typename DocumentLike>
-    void append_json_document(DocumentLike& doc);
+    bool append_json_document(DocumentLike& doc);
     template <typename DocumentLike>
-    void append_json_document_single_pass(DocumentLike& doc);
+    bool append_json_document_single_pass(DocumentLike& doc);
     void append_json_object_fields(simdjson::ondemand::object& object, std::string& prefix);
     void append_json_value(int col_index, simdjson::ondemand::value& value);
     void append_json_value_if_new(int col_index, simdjson::ondemand::value& value);
@@ -70,6 +70,8 @@ private:
     bool append_array_any_value(const std::string& path, simdjson::ondemand::value& value);
     bool mark_column_seen(int col_index);
     void parse_ndjson_view(std::string_view ndjson_bytes);
+    bool parse_ndjson_stream_fast(std::string_view ndjson_bytes, int64_t& skip_lines);
+    void parse_ndjson_lines_safe(std::string_view ndjson_bytes, int64_t skip_lines);
     void parse_ndjson_parallel(std::string_view ndjson_bytes, int thread_count);
     void record_error(std::string code, std::string message, std::string source,
                       int64_t row_index, std::string column_name, bool skip_record);

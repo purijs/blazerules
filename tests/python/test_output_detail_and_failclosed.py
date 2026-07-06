@@ -17,7 +17,9 @@ from pathlib import Path
 
 # Bootstrap: make a locally built extension importable without installing.
 _ROOT = Path(__file__).resolve().parents[2]
-for _build in ("cmake-build-release", "cmake-build-debug", "build"):
+_LOCAL_BUILDS = ("build-python-smoke2", "build-python-smoke", "cmake-build-release",
+                 "cmake-build-debug", "build")
+for _build in reversed(_LOCAL_BUILDS):
     _p = _ROOT / _build
     if _p.exists():
         sys.path.insert(0, str(_p))

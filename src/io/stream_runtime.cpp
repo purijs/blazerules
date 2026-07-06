@@ -207,7 +207,7 @@ StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config) {
 
     auto consumer = make_consumer(config);
     std::unique_ptr<KafkaProducer> producer;
-    if (!config.output_topic.empty()) {
+    if (!config.output_topic.empty() || !config.dlq_topic.empty()) {
         producer = std::make_unique<KafkaProducer>(config.brokers, config.producer_conf);
     }
 
@@ -224,17 +224,34 @@ StreamRunStats run_stream(RuleEngine& engine, const StreamRunConfig& config) {
         auto batch = poll_owned_batch(*consumer, want, config.poll_timeout_ms);
         if (batch.views.empty()) break;
 
+        ++stats.batches;
+        stats.messages += static_cast<int64_t>(batch.views.size());
+
         const auto start = std::chrono::steady_clock::now();
-        BatchResult result = evaluate_stream_batch(engine, config, batch.views);
+        BatchResult result;
+        try {
+            result = evaluate_stream_batch(engine, config, batch.views);
+        } catch (const std::exception&) {
+            if (config.dlq_topic.empty() || !producer) throw;
+            for (const auto& view : batch.views) {
+                producer->produce(config.dlq_topic, std::string(view));
+                ++stats.dlq_routed;
+            }
+            if (config.commit_offsets) {
+                if (!producer->flush(config.flush_timeout_ms)) { delivery_failed = true; break; }
+                consumer->commitSync();
+            }
+            continue;
+        }
         const auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
             std::chrono::steady_clock::now() - start).count();
 
-        ++stats.batches;
-        stats.messages += static_cast<int64_t>(batch.views.size());
         stats.matched += result.n_matched;
         stats.eval_us += elapsed;
 
-        if (producer) stats.emitted += emit_decisions(*producer, config.output_topic, result);
+        if (producer && !config.output_topic.empty()) {
+            stats.emitted += emit_decisions(*producer, config.output_topic, result);
+        }
         if (config.commit_offsets) {
             // At-least-once: durably deliver this batch's decisions before advancing the
             // committed offset. commitSync() commits the consumer *position*, so a later

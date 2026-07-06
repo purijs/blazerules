@@ -79,23 +79,52 @@ blazerules stream kafka \
   --brokers localhost:9092 \
   --input-topic transactions \
   --output-topic decisions \
+  --dlq-topic decisions-dlq \
   --format protobuf \
   --descriptor transaction.desc \
-  --message payments.Transaction
+  --message payments.Transaction \
+  --consumer-conf security.protocol=SASL_SSL
 ```
 
-Supported `eval` inputs are `ndjson`, `json`, `json-array`, `debezium`,
-`arrow-ipc`, `parquet`, `csv`, `avro`, and `protobuf`. Python-only in-memory
+Supported `eval` inputs are `ndjson`, `jsonl`, `json`, `json-array`, `debezium`,
+`arrow-ipc`, `arrow`, `parquet`, `csv`, `avro`, `protobuf`, and `auto`. Output
+modes are `summary`, `decisions-jsonl`, `grouped-decisions`, `rule-counts`,
+`bitmasks`, and `arrow-ipc` (a binary Arrow stream of per-row decisions that
+mirrors the in-memory `BatchResult` a Python caller reads). Python-only in-memory
 objects such as `pyarrow.RecordBatch` map to CLI file/stdin equivalents such as
 Arrow IPC, Parquet, or CSV.
+
+`eval`, `validate`, `backtest`, and `stream kafka` accept `--config run.yaml`,
+a single-run config (`rules`/`input`/`output`/`engine`/`models`/`aws`) that
+maps onto the flags below; explicit flags override the file. `blazerules stream kafka` adds
+`--dlq-topic` (route undecodable records to a dead-letter topic and keep
+consuming) and repeatable `--consumer-conf k=v` / `--producer-conf k=v` for
+librdkafka settings such as SASL/SSL. Malformed records in an NDJSON stream are
+skipped and counted by default; set `ingest_error_mode=HARD_FAIL` when a stream
+should stop on the first bad record.
+
+### Interfaces at a glance
+
+| Surface | What it is | Entry points |
+| --- | --- | --- |
+| Python SDK (`blazerules`, `blazerules_io`) | In-process library; accepts native `pyarrow.RecordBatch` objects and NDJSON/bytes | `RuleEngine`, `evaluate_ndjson/_batch/_messages`, `run_stream`, decoders |
+| `blazerules` CLI | Full batch/stream data plane without Python; same rules, operators, models, lookups, S3, formats | `info`, `validate`, `eval`, `backtest`, `stream kafka` |
+| `blazerules_agent` | Long-running operational ingest | HTTP `/v1/logs`, `stdin`, `file_tail` |
+| `blazerules_dashboard` | Local read-only observability UI | serves decision/dead-letter logs |
+
+The Python SDK and the `blazerules` CLI expose the **same** rules, operators,
+model/lookup/S3 support, ingestion formats, streaming modes, and output/routing
+primitives. The only difference is the boundary: Python takes in-memory objects,
+while the CLI takes files, stdin, and Kafka (Arrow IPC/Parquet/CSV are the
+on-the-wire equivalents of an in-memory `pyarrow.RecordBatch`).
 
 ## What BlazeRules Can Ingest
 
 | Input | How to use it | Typical use |
 | --- | --- | --- |
-| JSON / NDJSON bytes | `RuleEngine.evaluate_ndjson(...)` | API payloads, application events, log lines already formatted as JSON. |
+| JSON / NDJSON bytes | `RuleEngine.evaluate_ndjson(...)` or `blazerules eval --input ndjson` | API payloads, application events, log lines already formatted as JSON. |
 | Python lists of JSON strings | `RuleEngine.evaluate_messages(...)` | Small integrations and local scripts. |
-| PyArrow / Arrow batches | `RuleEngine.evaluate_batch(...)` | Typed pipelines, Parquet/Arrow data, high-throughput paths. |
+| PyArrow / Arrow batches | `RuleEngine.evaluate_batch(...)` or `blazerules eval --input arrow-ipc\|parquet\|csv` | Typed pipelines, Parquet/Arrow data, high-throughput paths. |
 | Kafka | `blazerules stream kafka`, `blazerules_io.KafkaConsumer`, or `run_stream(...)` | Microbatch JSON, Arrow IPC, Avro, Protobuf, or Debezium consume → evaluate → produce decisions. |
 | HTTP logs/events | `blazerules_agent --input http` or `instances[].input.type: http` | Apps POST NDJSON to `/v1/logs`. |
 | stdin | `blazerules_agent --input stdin` | Pipe terminal output or process logs into BlazeRules. |

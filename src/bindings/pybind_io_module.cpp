@@ -349,6 +349,7 @@ PYBIND11_MODULE(blazerules_io, m) {
         .def_readwrite("group_id", &blazerules_io::StreamRunConfig::group_id)
         .def_readwrite("input_topics", &blazerules_io::StreamRunConfig::input_topics)
         .def_readwrite("output_topic", &blazerules_io::StreamRunConfig::output_topic)
+        .def_readwrite("dlq_topic", &blazerules_io::StreamRunConfig::dlq_topic)
         .def_readwrite("consumer_conf", &blazerules_io::StreamRunConfig::consumer_conf)
         .def_readwrite("producer_conf", &blazerules_io::StreamRunConfig::producer_conf)
         .def_readwrite("batch_size", &blazerules_io::StreamRunConfig::batch_size)
@@ -369,7 +370,8 @@ PYBIND11_MODULE(blazerules_io, m) {
         .def_readonly("matched", &blazerules_io::StreamRunStats::matched)
         .def_readonly("emitted", &blazerules_io::StreamRunStats::emitted)
         .def_readonly("eval_us", &blazerules_io::StreamRunStats::eval_us)
-        .def_readonly("delivery_errors", &blazerules_io::StreamRunStats::delivery_errors);
+        .def_readonly("delivery_errors", &blazerules_io::StreamRunStats::delivery_errors)
+        .def_readonly("dlq_routed", &blazerules_io::StreamRunStats::dlq_routed);
 
     m.def("run_stream",
           [](RuleEngine& engine, const blazerules_io::StreamRunConfig& config) {
