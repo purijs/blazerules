@@ -5,6 +5,8 @@
 #include <iostream>
 #include <string>
 
+#include "blazerules/version.h"
+
 Options parse_args(int argc, char** argv) {
     Options opt;
     for (int i = 1; i < argc; ++i) {
@@ -27,7 +29,10 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--rules") opt.rules_path = need("--rules");
         else if (a == "--candidate-rules") opt.candidate_rules_path = need("--candidate-rules");
         else if (a == "--rules-history-dir") opt.rules_history_dir = need("--rules-history-dir");
-        else if (a == "--help" || a == "-h") {
+        else if (a == "--version") {
+            std::cout << blazerules::VERSION << "\n";
+            std::exit(0);
+        } else if (a == "--help" || a == "-h") {
             std::cout
                 << "Usage: blazerules_dashboard [options]\n\n"
                 << "Options:\n"

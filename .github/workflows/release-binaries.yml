@@ -128,8 +128,26 @@ jobs:
             echo "Features: core CLI, ONNX, IO, Kafka, Avro, Protobuf, S3, dashboard, agent, runtime SIMD dispatch"
           } > package/VERSION.txt
           package/bin/blazerules info
+          expected_version="$(package/bin/blazerules --version)"
+          test "$(package/bin/blazerules_agent --version)" = "$expected_version"
+          test "$(package/bin/blazerules_dashboard --version)" = "$expected_version"
+          if [[ "$GITHUB_REF_NAME" == v* ]]; then
+            test "$expected_version" = "${GITHUB_REF_NAME#v}"
+          fi
           package/bin/blazerules_agent --help >/dev/null
           package/bin/blazerules_dashboard --help >/dev/null
+          package/bin/blazerules_dashboard --host 127.0.0.1 --port 19707 --poll-ms 5000 >/tmp/blazerules-dashboard.log 2>&1 &
+          dash_pid=$!
+          for i in $(seq 1 50); do
+            if curl -fsS http://127.0.0.1:19707/api/health >/dev/null; then
+              break
+            fi
+            sleep 0.1
+          done
+          curl -fsS http://127.0.0.1:19707/ | grep -q '/assets/styles.css'
+          curl -fsS http://127.0.0.1:19707/assets/styles.css | grep -q '.app'
+          kill "$dash_pid"
+          wait "$dash_pid" 2>/dev/null || true
           tar -C package -czf "${{ matrix.asset }}" .
 
       - uses: actions/upload-artifact@v4

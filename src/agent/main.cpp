@@ -509,6 +509,9 @@ Options parse_args(int argc, char** argv) {
         } else if (a == "--dedupe-ttl-seconds") {
             opt.single.dedupe.enabled = true;
             opt.single.dedupe.ttl_seconds = std::atoi(need("--dedupe-ttl-seconds").c_str());
+        } else if (a == "--version") {
+            std::cout << blazerules::VERSION << "\n";
+            std::exit(0);
         } else if (a == "--help" || a == "-h") {
             std::cout
                 << "Usage: blazerules_agent [--config config.yaml] OR single-instance flags\n\n"

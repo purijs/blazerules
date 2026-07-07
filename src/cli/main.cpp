@@ -935,6 +935,10 @@ int main(int argc, char** argv) {
             return 0;
         }
         const std::string command = argv[1];
+        if (command == "--version") {
+            std::cout << blazerules::VERSION << "\n";
+            return 0;
+        }
         if (command == "info") return command_info();
         if (command == "eval") return command_eval(parse_options(argc, argv, 2));
         if (command == "validate") return command_validate(parse_options(argc, argv, 2));
