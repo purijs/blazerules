@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BlazeRules Console</title>
+<link rel="stylesheet" href="/assets/styles.css">
+
+</head>
+<body>
+<div class="app">
+<nav>
+  <div class="brand"><h1>BlazeRules</h1><div class="sub">local operations console</div></div>
+  <button class="navbtn active" data-tab="overview">Overview</button>
+  <button class="navbtn" data-tab="logs">Event Timeline</button>
+  <button class="navbtn" data-tab="rules">Rule Fire Rates</button>
+  <button class="navbtn" data-tab="ruleset">Ruleset Visualizer</button>
+  <button class="navbtn" data-tab="errors">Errors / DLQ</button>
+  <button class="navbtn" data-tab="benchmarks">Benchmarks</button>
+  <button class="navbtn" data-tab="system">System</button>
+</nav>
+<main>
+<header>
+  <input id="filter" class="search" placeholder="Filter visible tables by decision, rule, error, or source">
+  <div class="topmeta"><span id="topline">Loading...</span><span class="status"><span class="dot" id="healthdot"></span><span id="healthtext">starting</span></span></div>
+</header>
+<div class="wrap">
+  <section id="overview" class="view active">
+    <div class="grid" id="cards"></div>
+    <div class="grid">
+      <div class="panel span7"><h2>Event Timeline</h2><div class="timeline"><div id="timelineBars" class="timeline-bars"></div><svg id="spark"></svg></div></div>
+      <div class="panel span5"><h2>Decision Distribution</h2><div class="scroll"><table><thead><tr><th>Decision</th><th>Recent Count</th><th>Share</th></tr></thead><tbody id="decisionDist"></tbody></table></div></div>
+    </div>
+    <div class="grid">
+      <div class="panel span6"><h2>Latency Breakdown</h2><div class="bars" id="latencyBars"></div></div>
+      <div class="panel span6"><h2>Top Winning Rules</h2><div class="scroll"><table><thead><tr><th>Rule</th><th>Winning Recent</th></tr></thead><tbody id="winningRows"></tbody></table></div></div>
+    </div>
+  </section>
+
+  <section id="logs" class="view">
+    <div class="grid">
+      <div class="panel span3"><h2>Facets</h2><div class="facets" id="logFacets"></div></div>
+      <div class="panel span9"><h2>Recent Decision Events</h2><div class="scroll tall"><table><thead><tr><th>Time</th><th>Matched</th><th>Decision</th><th>Score</th><th>Risk</th><th>Winning Rule</th><th>Ruleset</th></tr></thead><tbody id="decisionRows"></tbody></table></div></div>
+    </div>
+  </section>
+
+  <section id="rules" class="view">
+    <div class="grid">
+      <div class="panel span8"><h2>Top Rules</h2><div class="scroll tall"><table><thead><tr><th>Rule</th><th>Fired Total</th><th>Fire Rate</th><th>Winning Recent</th></tr></thead><tbody id="ruleRows"></tbody></table></div></div>
+      <div class="panel span4"><h2>Rule Plan Overview</h2><div class="bars" id="operatorBars"></div></div>
+    </div>
+  </section>
+
+  <section id="ruleset" class="view">
+    <div class="grid">
+      <div class="panel span3"><h2>Validation</h2><div class="bars" id="rulesetSummary"></div></div>
+      <div class="panel span3"><h2>Actions</h2><div class="scroll"><table><thead><tr><th>Action</th><th>Rules</th></tr></thead><tbody id="actionRows"></tbody></table></div></div>
+      <div class="panel span6"><h2>Version History</h2><div class="scroll"><table><thead><tr><th>Modified</th><th>Rules</th><th>Valid</th><th>Path</th></tr></thead><tbody id="versionRows"></tbody></table></div></div>
+    </div>
+    <div class="grid">
+      <div class="panel span6"><h2>Active YAML</h2><pre id="activeYaml"></pre></div>
+      <div class="panel span6"><h2>Candidate Diff</h2><div class="scroll tall"><table><thead><tr><th>Line</th><th>Kind</th><th>Active</th><th>Candidate</th></tr></thead><tbody id="diffRows"></tbody></table></div></div>
+    </div>
+  </section>
+
+  <section id="errors" class="view">
+    <div class="grid"><div class="panel span3"><h2>Error Counts</h2><div class="scroll"><table><thead><tr><th>Code</th><th>Count</th></tr></thead><tbody id="errorCounts"></tbody></table></div></div><div class="panel span9"><h2>Recent Dead Letters</h2><div class="scroll tall"><table><thead><tr><th>Time</th><th>Code</th><th>Column</th><th>Message</th></tr></thead><tbody id="errorRows"></tbody></table></div></div></div>
+  </section>
+
+  <section id="benchmarks" class="view">
+    <div class="grid"><div class="panel span3"><h2>By Format</h2><div class="scroll"><table><thead><tr><th>Format</th><th>OK</th><th>Median Engine</th><th>Median GiB/s</th></tr></thead><tbody id="benchFormats"></tbody></table></div></div><div class="panel span9"><h2>Matrix Rows</h2><div class="scroll tall"><table><thead><tr><th>Format</th><th>Size</th><th>Records</th><th>Batch</th><th>Status</th><th>Engine r/s</th><th>GiB/s</th><th>p95 ms</th></tr></thead><tbody id="benchRows"></tbody></table></div></div></div>
+  </section>
+
+  <section id="system" class="view">
+    <div class="panel"><h2>Sources</h2><div class="scroll"><table><thead><tr><th>Name</th><th>Configured</th><th>Active</th><th>Location</th><th>Bytes</th><th>Last Error</th></tr></thead><tbody id="sourceRows"></tbody></table></div></div>
+    <div class="panel"><h2>Raw Metrics</h2><div class="scroll tall"><table><thead><tr><th>Name</th><th>Value</th><th>Labels</th></tr></thead><tbody id="metricRows"></tbody></table></div></div>
+  </section>
+</div>
+</main>
+</div>
+<script src="/assets/app.js" defer></script>

@@ -297,8 +297,35 @@ endif()
 option(BLAZERULES_DASHBOARD "Build the local read-only BlazeRules dashboard server" ON)
 if(BLAZERULES_DASHBOARD)
         find_package(httplib CONFIG REQUIRED)
-        add_executable(blazerules_dashboard src/dashboard/main.cpp)
-        target_include_directories(blazerules_dashboard PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/include)
+        find_package(Python3 COMPONENTS Interpreter REQUIRED)
+        set(BLAZERULES_DASHBOARD_ASSETS
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/ui/index.html
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/ui/styles.css
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/ui/app.js)
+        set(BLAZERULES_DASHBOARD_ASSETS_CPP
+                ${CMAKE_CURRENT_BINARY_DIR}/generated/dashboard_assets.cpp)
+        add_custom_command(
+                OUTPUT ${BLAZERULES_DASHBOARD_ASSETS_CPP}
+                COMMAND ${Python3_EXECUTABLE}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/embed_assets.py
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/ui/index.html
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/ui/styles.css
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/ui/app.js
+                        ${BLAZERULES_DASHBOARD_ASSETS_CPP}
+                DEPENDS ${BLAZERULES_DASHBOARD_ASSETS}
+                        ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard/embed_assets.py
+                VERBATIM)
+        add_executable(blazerules_dashboard
+                src/dashboard/main.cpp
+                src/dashboard/options.cpp
+                src/dashboard/json_util.cpp
+                src/dashboard/collectors.cpp
+                src/dashboard/dashboard_server.cpp
+                src/dashboard/routes.cpp
+                ${BLAZERULES_DASHBOARD_ASSETS_CPP})
+        target_include_directories(blazerules_dashboard PRIVATE
+                ${CMAKE_CURRENT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard)
         target_link_libraries(blazerules_dashboard PRIVATE httplib::httplib)
         if(UNIX AND NOT APPLE)
                 target_link_libraries(blazerules_dashboard PRIVATE anl)
