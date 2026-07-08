@@ -2,15 +2,19 @@
 
 #include <algorithm>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <tuple>
 #include <utility>
 
 #include "blazerules/version.h"
 #include "json_util.h"
 
+namespace fs = std::filesystem;
+
 DashboardServer::DashboardServer(Options options)
     : options_(std::move(options)),
-      decision_tailer_(options_.decision_log, options_.tail_lines),
+      decision_tailer_(options_.decision_log, options_.tail_lines, options_.max_index_rows),
       dead_letter_tailer_(options_.dead_letter_log, options_.tail_lines),
       metrics_scraper_(options_.metrics_url),
       benchmark_reader_(options_.results_jsonl),
@@ -72,10 +76,16 @@ std::string DashboardServer::summary_json() const {
         records = static_cast<double>(s.decisions.rows_seen);
         matched = static_cast<double>(s.decisions.matched_seen);
     }
+    if (skipped == 0.0 && s.errors.rows_seen > 0) {
+        skipped = static_cast<double>(s.errors.rows_seen);
+    }
     double match_rate = records > 0.0 ? matched / records : 0.0;
     double total_ms = histogram_mean_us(s.metrics, "blazerules_batch_total_latency_us") / 1000.0;
     double eval_ms = histogram_mean_us(s.metrics, "blazerules_batch_evaluation_latency_us") / 1000.0;
     double transpose_ms = histogram_mean_us(s.metrics, "blazerules_batch_transpose_latency_us") / 1000.0;
+    uintmax_t decision_log_bytes = 0;
+    auto decision_source = s.sources.find("decision_log");
+    if (decision_source != s.sources.end()) decision_log_bytes = decision_source->second.bytes;
     std::string active_version;
     if (!s.decisions.ruleset_versions.empty()) active_version = *s.decisions.ruleset_versions.rbegin();
 
@@ -98,7 +108,13 @@ std::string DashboardServer::summary_json() const {
     out += ",";
     out += json_pair("recent_records_per_sec", s.recent_rps);
     out += ",";
+    out += json_pair("recent_bytes_per_sec", s.recent_bytes_per_sec);
+    out += ",";
     out += json_pair("recent_log_records", s.decisions.rows_seen);
+    out += ",";
+    out += json_pair("decision_log_bytes", static_cast<double>(decision_log_bytes));
+    out += ",";
+    out += json_bool_pair("has_metrics", !s.metrics.entries.empty());
     out += ",";
     out += json_pair("avg_score_recent", s.decisions.avg_score);
     out += "},\"timing_ms\":{";
@@ -119,6 +135,8 @@ std::string DashboardServer::summary_json() const {
         out += json_pair("ts_ms", h.ts_ms);
         out += ",";
         out += json_pair("rps", h.rps);
+        out += ",";
+        out += json_pair("bytes_per_sec", h.bytes_per_sec);
         out += ",";
         out += json_pair("total_ms", h.total_ms);
         out += ",";
@@ -146,16 +164,43 @@ std::string DashboardServer::metrics_json() const {
     return out;
 }
 
-std::string DashboardServer::decisions_json(size_t limit) const {
-    auto s = snapshot();
+namespace {
+
+std::string facet_json(const std::map<std::string, int64_t>& facets) {
+    std::string out = "{";
+    bool first = true;
+    for (const auto& [key, value] : facets) {
+        if (!first) out += ",";
+        first = false;
+        out += json_pair(key, value);
+    }
+    out += "}";
+    return out;
+}
+
+std::string decisions_payload(const DecisionQueryResult& result, const DecisionQuery& query) {
+    size_t limit = std::max<size_t>(1, query.limit);
+    size_t offset = query.offset;
     std::string out = "{\"total_recent\":";
-    out += std::to_string(s.decisions.rows_seen);
+    out += std::to_string(result.total_matches);
+    out += ",\"indexed_rows\":";
+    out += std::to_string(result.indexed_rows);
+    out += ",\"truncated\":";
+    out += result.truncated ? "true" : "false";
+    out += ",\"offset\":";
+    out += std::to_string(offset);
+    out += ",\"limit\":";
+    out += std::to_string(limit);
+    out += ",\"has_more\":";
+    out += (offset + result.rows.size() < static_cast<size_t>(std::max<int64_t>(result.total_matches, 0))) ? "true" : "false";
+    out += ",\"decision_facets\":";
+    out += facet_json(result.decision_facets);
+    out += ",\"risk_band_facets\":";
+    out += facet_json(result.risk_band_facets);
     out += ",\"rows\":[";
-    size_t n = std::min(limit, s.decisions.recent.size());
-    size_t start = s.decisions.recent.size() > n ? s.decisions.recent.size() - n : 0;
-    for (size_t i = start; i < s.decisions.recent.size(); ++i) {
-        if (i != start) out += ",";
-        const auto& r = s.decisions.recent[i];
+    for (size_t i = 0; i < result.rows.size(); ++i) {
+        if (i) out += ",";
+        const auto& r = result.rows[i];
         out += "{";
         out += json_pair("ts_ms", r.ts_ms);
         out += ",";
@@ -178,13 +223,20 @@ std::string DashboardServer::decisions_json(size_t limit) const {
     return out;
 }
 
+}  // namespace
+
+std::string DashboardServer::decisions_json(const DecisionQuery& query) const {
+    DecisionQueryResult result = decision_tailer_.query(query);
+    return decisions_payload(result, query);
+}
+
 std::string DashboardServer::rules_json(size_t limit) const {
     auto s = snapshot();
     struct RuleRow {
         std::string id;
         double fired = 0.0;
         double fire_rate = 0.0;
-        int64_t winning_recent = 0;
+        int64_t winning_total = 0;
     };
     std::map<std::string, RuleRow> rows;
     for (const auto& entry : s.metrics.entries) {
@@ -198,13 +250,22 @@ std::string DashboardServer::rules_json(size_t limit) const {
     for (const auto& [rule_id, count] : s.decisions.winning_rule_counts) {
         auto& row = rows[rule_id];
         row.id = rule_id;
-        row.winning_recent = count;
+        row.winning_total = count;
+        if (row.fired == 0.0) row.fired = static_cast<double>(count);
     }
+    double denominator = s.decisions.rows_seen > 0
+        ? static_cast<double>(s.decisions.rows_seen)
+        : metric_value(s.metrics, "blazerules_records_evaluated_total");
     std::vector<RuleRow> vec;
-    for (auto& [_, row] : rows) vec.push_back(row);
+    for (auto& [_, row] : rows) {
+        if (row.fire_rate == 0.0 && denominator > 0.0 && row.fired > 0.0) {
+            row.fire_rate = row.fired / denominator;
+        }
+        vec.push_back(row);
+    }
     std::sort(vec.begin(), vec.end(), [](const RuleRow& a, const RuleRow& b) {
         if (a.fired != b.fired) return a.fired > b.fired;
-        return a.winning_recent > b.winning_recent;
+        return a.winning_total > b.winning_total;
     });
     if (vec.size() > limit) vec.resize(limit);
     std::string out = "{\"rows\":[";
@@ -217,7 +278,7 @@ std::string DashboardServer::rules_json(size_t limit) const {
         out += ",";
         out += json_pair("fire_rate", vec[i].fire_rate);
         out += ",";
-        out += json_pair("winning_recent", vec[i].winning_recent);
+        out += json_pair("winning_total", vec[i].winning_total);
         out += "}";
     }
     out += "]}";
@@ -449,26 +510,37 @@ void DashboardServer::refresh_once() {
     next.sources[rules_source.name] = rules_source;
 
     double records = metric_value(next.metrics, "blazerules_records_evaluated_total");
+    if (records == 0.0) records = static_cast<double>(next.decisions.rows_seen);
+    uintmax_t decision_log_bytes = 0;
+    auto decision_it = next.sources.find("decision_log");
+    if (decision_it != next.sources.end()) decision_log_bytes = decision_it->second.bytes;
     if (records > 0.0 && last_records_ms_ > 0 && next.last_update_ms > last_records_ms_ && records >= last_records_) {
         next.recent_rps = (records - last_records_) * 1000.0 /
                           static_cast<double>(next.last_update_ms - last_records_ms_);
+    }
+    if (last_decision_log_bytes_ms_ > 0 && next.last_update_ms > last_decision_log_bytes_ms_ &&
+        decision_log_bytes >= last_decision_log_bytes_) {
+        next.recent_bytes_per_sec = static_cast<double>(decision_log_bytes - last_decision_log_bytes_) * 1000.0 /
+                                    static_cast<double>(next.last_update_ms - last_decision_log_bytes_ms_);
     }
     if (records > 0.0) {
         last_records_ = records;
         last_records_ms_ = next.last_update_ms;
     }
+    last_decision_log_bytes_ = decision_log_bytes;
+    last_decision_log_bytes_ms_ = next.last_update_ms;
 
     HistoryPoint hp;
     hp.ts_ms = next.last_update_ms;
     hp.rps = next.recent_rps;
+    hp.bytes_per_sec = next.recent_bytes_per_sec;
     hp.total_ms = histogram_mean_us(next.metrics, "blazerules_batch_total_latency_us") / 1000.0;
     hp.evaluation_ms = histogram_mean_us(next.metrics, "blazerules_batch_evaluation_latency_us") / 1000.0;
     hp.transpose_ms = histogram_mean_us(next.metrics, "blazerules_batch_transpose_latency_us") / 1000.0;
 
     std::lock_guard<std::mutex> lock(mu_);
     next.history = snapshot_.history;
-    if (hp.rps > 0.0 || hp.total_ms > 0.0 || !next.metrics.entries.empty() ||
-        next.decisions.rows_seen > 0 || !next.benchmarks.rows.empty()) {
+    if (hp.rps > 0.0 || hp.bytes_per_sec > 0.0 || hp.total_ms > 0.0 || !next.metrics.entries.empty() || !next.benchmarks.rows.empty()) {
         next.history.push_back(hp);
         if (next.history.size() > 180) {
             next.history.erase(next.history.begin(), next.history.begin() + static_cast<long>(next.history.size() - 180));

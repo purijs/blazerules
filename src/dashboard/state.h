@@ -134,6 +134,7 @@ struct RulesetState {
 struct HistoryPoint {
     int64_t ts_ms = 0;
     double rps = 0.0;
+    double bytes_per_sec = 0.0;
     double total_ms = 0.0;
     double evaluation_ms = 0.0;
     double transpose_ms = 0.0;
@@ -149,6 +150,27 @@ struct DashboardSnapshot {
     RulesetState ruleset;
     std::vector<HistoryPoint> history;
     double recent_rps = 0.0;
+    double recent_bytes_per_sec = 0.0;
+};
+
+struct DecisionQuery {
+    size_t limit = 500;
+    size_t offset = 0;
+    bool scan_file = false;
+    std::string decision;
+    std::string risk_band;
+    std::string rule;
+    int64_t from_ms = 0;
+    int64_t to_ms = 0;
+};
+
+struct DecisionQueryResult {
+    std::vector<DecisionRow> rows;
+    int64_t total_matches = 0;
+    int64_t indexed_rows = 0;
+    bool truncated = false;
+    std::map<std::string, int64_t> decision_facets;
+    std::map<std::string, int64_t> risk_band_facets;
 };
 
 struct Options {
@@ -156,6 +178,7 @@ struct Options {
     int port = 9470;
     int poll_ms = 1000;
     size_t tail_lines = 5000;
+    size_t max_index_rows = 5000000;
     std::string decision_log;
     std::string dead_letter_log;
     std::string metrics_url;

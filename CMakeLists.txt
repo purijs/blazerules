@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 if(DEFINED ENV{VCPKG_ROOT} AND NOT CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE PATH "")
 endif()
-project(blazerules VERSION 0.3.5 LANGUAGES CXX)
+project(blazerules VERSION 0.4.0 LANGUAGES CXX)
 include(CheckCXXCompilerFlag)
 include(CheckIPOSupported)
 
@@ -326,7 +326,7 @@ if(BLAZERULES_DASHBOARD)
         target_include_directories(blazerules_dashboard PRIVATE
                 ${CMAKE_CURRENT_SOURCE_DIR}/include
                 ${CMAKE_CURRENT_SOURCE_DIR}/src/dashboard)
-        target_link_libraries(blazerules_dashboard PRIVATE httplib::httplib)
+        target_link_libraries(blazerules_dashboard PRIVATE httplib::httplib Arrow::arrow_static)
         if(UNIX AND NOT APPLE)
                 target_link_libraries(blazerules_dashboard PRIVATE anl)
         endif()
@@ -364,6 +364,7 @@ if(BLAZERULES_TESTS)
                 tests/parser_compile_tests.cpp
                 tests/fail_closed_tests.cpp
                 tests/malformed_ingest_tests.cpp
+                tests/decision_label_tests.cpp
                 tests/kernel_tests.cpp
                 tests/window_store_tests.cpp
         )

@@ -22,6 +22,7 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--port") opt.port = std::atoi(need("--port").c_str());
         else if (a == "--poll-ms") opt.poll_ms = std::atoi(need("--poll-ms").c_str());
         else if (a == "--tail-lines") opt.tail_lines = static_cast<size_t>(std::max(1, std::atoi(need("--tail-lines").c_str())));
+        else if (a == "--max-index-rows") opt.max_index_rows = static_cast<size_t>(std::max(0LL, std::atoll(need("--max-index-rows").c_str())));
         else if (a == "--decision-log") opt.decision_log = need("--decision-log");
         else if (a == "--dead-letter-log") opt.dead_letter_log = need("--dead-letter-log");
         else if (a == "--metrics-url") opt.metrics_url = need("--metrics-url");
@@ -40,6 +41,7 @@ Options parse_args(int argc, char** argv) {
                 << "  --port PORT                 default 9470\n"
                 << "  --poll-ms MS                default 1000\n"
                 << "  --tail-lines N              default 5000\n"
+                << "  --max-index-rows N          decision rows kept in the filter index, default 5000000\n"
                 << "  --decision-log PATH         compact decision NDJSON\n"
                 << "  --dead-letter-log PATH      compact dead-letter NDJSON\n"
                 << "  --metrics-url URL           Prometheus URL, e.g. http://127.0.0.1:9464/metrics\n"

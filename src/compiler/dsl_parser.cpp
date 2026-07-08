@@ -592,6 +592,9 @@ ParseRuleResult parse_rule(const YAML::Node& node, const std::string& ruleset_ve
                                            "unknown action: '" + action_text + "'", "rule", spec.id,
                                            -1, BlazeRulesError::Domain::RULE_PARSE}};
     }
+    if (node["label"].IsDefined()) {
+        spec.action_label = decision_label(node["label"].as<std::string>());
+    }
     if (!severity_from_string(node["severity"].as<std::string>("LOW"), spec.severity)) {
         return ParseRuleResult{false, {}, {BlazeRulesError::UNKNOWN_SEVERITY, "unknown severity", "rule", spec.id,
                                            -1, BlazeRulesError::Domain::RULE_PARSE}};

@@ -70,8 +70,7 @@ private:
     bool append_array_any_value(const std::string& path, simdjson::ondemand::value& value);
     bool mark_column_seen(int col_index);
     void parse_ndjson_view(std::string_view ndjson_bytes);
-    bool parse_ndjson_stream_fast(std::string_view ndjson_bytes, int64_t& skip_lines);
-    void parse_ndjson_lines_safe(std::string_view ndjson_bytes, int64_t skip_lines);
+    void parse_ndjson_lines_safe(std::string_view ndjson_bytes);
     void parse_ndjson_parallel(std::string_view ndjson_bytes, int thread_count);
     void record_error(std::string code, std::string message, std::string source,
                       int64_t row_index, std::string column_name, bool skip_record);

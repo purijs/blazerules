@@ -82,3 +82,41 @@ TEST(MalformedIngestTest, AllValidStillFullyProcessed) {
     EXPECT_EQ(r.messages_skipped, 0);
     EXPECT_EQ(r.n_matched, 1);
 }
+
+TEST(MalformedIngestTest, UnclosedObjectDoesNotSwallowNextLine) {
+    RuleEngine engine;
+    engine.load_rules_from_string(kRules);
+    const std::string nd =
+        "{\"amount\":150,\"country\":\"US\"}\n"
+        "{\"country\":\n"
+        "{\"amount\":200,\"country\":\"XX\"}\n";
+    BatchResult r = engine.evaluate_ndjson(nd);
+    EXPECT_EQ(r.n_records, 2);
+    EXPECT_GE(r.messages_skipped, 1);
+    EXPECT_EQ(r.n_matched, 2);
+}
+
+TEST(MalformedIngestTest, LeadingUnclosedObjectDoesNotSwallowNextLine) {
+    RuleEngine engine;
+    engine.load_rules_from_string(kRules);
+    const std::string nd =
+        "{\"country\":\n"
+        "{\"amount\":200,\"country\":\"XX\"}\n";
+    BatchResult r = engine.evaluate_ndjson(nd);
+    EXPECT_EQ(r.n_records, 1);
+    EXPECT_GE(r.messages_skipped, 1);
+}
+
+TEST(MalformedIngestTest, MalformedFieldRecordsOffendingColumnAndMessage) {
+    RuleEngine engine;
+    engine.load_rules_from_string(kRules);
+    const std::string nd =
+        "{\"country\":\"US\",\"amount\": }\n"
+        "{\"amount\":200,\"country\":\"XX\"}\n";
+    BatchResult r = engine.evaluate_ndjson(nd);
+    EXPECT_EQ(r.n_records, 1);
+    ASSERT_FALSE(r.error_samples.empty());
+    EXPECT_FALSE(r.error_samples[0].column_name.empty());
+    EXPECT_NE(r.error_samples[0].message, r.error_samples[0].code);
+    EXPECT_NE(r.error_samples[0].message.find("field"), std::string::npos);
+}

@@ -204,18 +204,35 @@ Each agent input batches records by `batch_size` or `flush_ms`, evaluates the
 batch, and writes compact decision events. Bad records can be counted, skipped,
 or written to a dead-letter NDJSON file depending on ingest settings.
 
+`--output` accepts `stdout`, `ndjson`, or `arrow`. Use `--output arrow` with an
+`--output-path` to write decisions as a compact binary Arrow IPC stream instead
+of NDJSON; it stores the same columns, is several times smaller on disk, and is
+read directly by pyarrow, DuckDB, or pandas:
+
+```bash
+blazerules_agent --rules rules.yaml --input file_tail --path app.log \
+  --output arrow --output-path decisions.arrow
+```
+
+```python
+import pyarrow.ipc as ipc
+table = ipc.open_stream("decisions.arrow").read_all()
+```
+
 ## Decisions, DLQ, And Dashboard
 
 BlazeRules returns per-record decisions directly in Python/C++. The agent can
-also write an NDJSON decision log for downstream routing:
+also write an NDJSON (or Arrow) decision log for downstream routing:
 
 ```json
 {"ts_ms":1782150000000,"batch_row":0,"decision":"REVIEW","score":72.0,"risk_band":"HIGH","winning_rule_id":"high_risk_payment"}
 ```
 
 Dead-letter records keep malformed or type-bad input out of the hot path while
-preserving enough context to debug the producer. The dashboard reads decision
-logs, dead-letter logs, metrics, benchmark output, and rule summaries.
+preserving enough context to debug the producer: each record carries the error
+`code`, the offending `column_name`, and a `message` naming the field that could
+not be parsed. The dashboard reads decision logs, dead-letter logs, metrics,
+benchmark output, and rule summaries.
 
 ![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
 
@@ -313,6 +330,28 @@ ruleset:
 Top-level `fields` are optional hints, not a mandatory user schema. They are
 useful for entity keys, timestamps, nullability, and closed categorical values.
 Without hints, BlazeRules infers referenced fields from the first batch.
+
+### Custom decision labels
+
+`action` must be one of the five built-ins (`approve`, `score`, `flag`,
+`review`, `block`), which set scoring and risk-band behavior. To emit a custom
+decision instead of the built-in name, add an optional `label` — the rule keeps
+its `action` semantics but reports the custom label as the decision:
+
+```yaml
+decisions:
+  precedence: [approve, score, flag, review, bot_block, block]
+rules:
+  - id: bot_traffic
+    action: block
+    label: bot_block
+    conditions: {field: bot_score, op: gt, value: 0.9}
+```
+
+The label appears everywhere the decision does — `result.decisions`,
+`grouped_decision_indices()`, the agent decision log, and the dashboard. List
+custom labels in `decisions.precedence` to control how they rank against the
+built-ins.
 
 Logical forms:
 

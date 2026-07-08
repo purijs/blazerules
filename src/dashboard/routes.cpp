@@ -14,6 +14,25 @@ int limit_from_request(const httplib::Request& req, const char* name, int fallba
     return std::min(v, max_value);
 }
 
+int64_t int64_from_request(const httplib::Request& req, const char* name, int64_t fallback = 0) {
+    if (!req.has_param(name)) return fallback;
+    char* end = nullptr;
+    const std::string value = req.get_param_value(name);
+    long long parsed = std::strtoll(value.c_str(), &end, 10);
+    if (end == value.c_str()) return fallback;
+    return static_cast<int64_t>(parsed);
+}
+
+std::string string_from_request(const httplib::Request& req, const char* name) {
+    return req.has_param(name) ? req.get_param_value(name) : std::string{};
+}
+
+bool bool_from_request(const httplib::Request& req, const char* name) {
+    if (!req.has_param(name)) return false;
+    std::string value = req.get_param_value(name);
+    return value == "1" || value == "true" || value == "yes";
+}
+
 void set_static_content(httplib::Response& res, std::string_view body, const char* content_type) {
     res.set_content(std::string(body), content_type);
 }
@@ -43,8 +62,16 @@ void register_routes(httplib::Server& server, DashboardServer& dashboard) {
         res.set_content(dashboard.metrics_json(), "application/json");
     });
     server.Get("/api/decisions", [&](const httplib::Request& req, httplib::Response& res) {
-        res.set_content(dashboard.decisions_json(static_cast<size_t>(limit_from_request(req, "limit", 500, 5000))),
-                        "application/json");
+        DecisionQuery query;
+        query.limit = static_cast<size_t>(limit_from_request(req, "limit", 500, 5000));
+        query.offset = static_cast<size_t>(std::max<int64_t>(0, int64_from_request(req, "offset", 0)));
+        query.scan_file = bool_from_request(req, "scan");
+        query.decision = string_from_request(req, "decision");
+        query.risk_band = string_from_request(req, "risk_band");
+        query.rule = string_from_request(req, "rule");
+        query.from_ms = int64_from_request(req, "from_ms", 0);
+        query.to_ms = int64_from_request(req, "to_ms", 0);
+        res.set_content(dashboard.decisions_json(query), "application/json");
     });
     server.Get("/api/rules", [&](const httplib::Request& req, httplib::Response& res) {
         res.set_content(dashboard.rules_json(static_cast<size_t>(limit_from_request(req, "limit", 100, 5000))),

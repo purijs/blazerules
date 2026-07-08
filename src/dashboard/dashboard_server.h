@@ -22,7 +22,7 @@ public:
     std::string health_json() const;
     std::string summary_json() const;
     std::string metrics_json() const;
-    std::string decisions_json(size_t limit) const;
+    std::string decisions_json(const DecisionQuery& query) const;
     std::string rules_json(size_t limit) const;
     std::string errors_json(size_t limit) const;
     std::string benchmarks_json() const;
@@ -43,4 +43,6 @@ private:
     std::thread worker_;
     double last_records_ = 0.0;
     int64_t last_records_ms_ = 0;
+    uintmax_t last_decision_log_bytes_ = 0;
+    int64_t last_decision_log_bytes_ms_ = 0;
 };

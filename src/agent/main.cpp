@@ -1,4 +1,5 @@
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <condition_variable>
 #include <cctype>
@@ -20,6 +21,10 @@
 
 #include <sys/stat.h>
 
+#include <arrow/api.h>
+#include <arrow/io/file.h>
+#include <arrow/ipc/writer.h>
+#include <arrow/util/compression.h>
 #include <httplib.h>
 #include <yaml-cpp/yaml.h>
 
@@ -133,6 +138,7 @@ struct InputConfig {
 struct OutputConfig {
     std::string type = "stdout";  // stdout | ndjson
     std::string path;
+    std::string dead_letter_path;
 };
 
 struct DedupeConfig {
@@ -144,6 +150,7 @@ struct DedupeConfig {
 struct InstanceConfig {
     std::string name = "default";
     std::string rules;
+    std::vector<std::string> models;
     int batch_size = 2048;
     int flush_ms = 1000;
     std::string service = "unknown";
@@ -198,16 +205,31 @@ private:
 class InstanceRunner {
 public:
     explicit InstanceRunner(InstanceConfig config)
-        : config_(std::move(config)), dedupe_(config_.dedupe) {
-        EngineConfig engine_config;
-        engine_config.output_detail = EngineConfig::OUTPUT_DECISIONS;
+        : config_(std::move(config)), engine_(make_engine_config(config_)), dedupe_(config_.dedupe) {
         engine_.enable_metrics();
+        register_models();
         if (!config_.rules.empty()) {
             engine_.load_rules(config_.rules);
         }
         if (config_.output.type == "ndjson" && !config_.output.path.empty()) {
             out_file_.open(config_.output.path, std::ios::out | std::ios::app);
             if (!out_file_) throw std::runtime_error("failed to open output: " + config_.output.path);
+        } else if (config_.output.type == "arrow") {
+            if (config_.output.path.empty()) {
+                throw std::runtime_error("arrow output requires an --output-path file");
+            }
+            open_arrow_writer(config_.output.path);
+        }
+    }
+
+    ~InstanceRunner() {
+        if (arrow_writer_) {
+            (void) arrow_writer_->Close();
+            arrow_writer_.reset();
+        }
+        if (arrow_sink_) {
+            (void) arrow_sink_->Close();
+            arrow_sink_.reset();
         }
     }
 
@@ -218,6 +240,59 @@ public:
     }
 
 private:
+    void open_arrow_writer(const std::string& path) {
+        arrow_schema_ = arrow::schema({
+            arrow::field("ts_ms", arrow::int64()),
+            arrow::field("instance", arrow::utf8()),
+            arrow::field("batch_row", arrow::int32()),
+            arrow::field("ruleset_version", arrow::utf8()),
+            arrow::field("matched", arrow::boolean()),
+            arrow::field("decision", arrow::utf8()),
+            arrow::field("score", arrow::float64()),
+            arrow::field("risk_band", arrow::utf8()),
+            arrow::field("winning_rule_id", arrow::utf8()),
+        });
+        auto sink_result = arrow::io::FileOutputStream::Open(path);
+        if (!sink_result.ok()) {
+            throw std::runtime_error("failed to open arrow output: " + sink_result.status().ToString());
+        }
+        arrow_sink_ = *sink_result;
+        arrow::ipc::IpcWriteOptions write_options = arrow::ipc::IpcWriteOptions::Defaults();
+        if (arrow::util::Codec::IsAvailable(arrow::Compression::ZSTD)) {
+            auto codec = arrow::util::Codec::Create(arrow::Compression::ZSTD);
+            if (codec.ok()) write_options.codec = std::move(*codec);
+        } else if (arrow::util::Codec::IsAvailable(arrow::Compression::LZ4_FRAME)) {
+            auto codec = arrow::util::Codec::Create(arrow::Compression::LZ4_FRAME);
+            if (codec.ok()) write_options.codec = std::move(*codec);
+        }
+        auto writer_result = arrow::ipc::MakeStreamWriter(arrow_sink_, arrow_schema_, write_options);
+        if (!writer_result.ok()) {
+            throw std::runtime_error("failed to open arrow writer: " + writer_result.status().ToString());
+        }
+        arrow_writer_ = *writer_result;
+    }
+
+    static EngineConfig make_engine_config(const InstanceConfig& config) {
+        EngineConfig engine_config;
+        engine_config.output_detail = EngineConfig::OUTPUT_DECISIONS;
+        if (!config.output.dead_letter_path.empty()) {
+            engine_config.dead_letter_path = config.output.dead_letter_path;
+            engine_config.ingest_error_mode = EngineConfig::SKIP_TO_DEAD_LETTER;
+            engine_config.max_error_samples = std::max(config.batch_size, engine_config.max_error_samples);
+        }
+        return engine_config;
+    }
+
+    void register_models() {
+        for (const std::string& model : config_.models) {
+            const size_t eq = model.find('=');
+            if (eq == std::string::npos || eq == 0 || eq + 1 >= model.size()) {
+                throw std::runtime_error("--model must be name=path_or_s3_uri");
+            }
+            engine_.register_model(model.substr(0, eq), model.substr(eq + 1));
+        }
+    }
+
     std::string canonicalize(std::string_view line) {
         std::string t = trim(line);
         if (looks_json_object(t)) return t;
@@ -266,9 +341,59 @@ private:
         write_decisions(result);
     }
 
+    void write_decisions_arrow(const BatchResult& result) {
+        const int n = result.n_records;
+        std::vector<uint8_t> matched(static_cast<size_t>(std::max(n, 0)), 0);
+        for (int32_t idx : result.matched_record_indices) {
+            if (idx >= 0 && idx < n) matched[static_cast<size_t>(idx)] = 1;
+        }
+        const int64_t ts = result.evaluation_timestamp_ms ? result.evaluation_timestamp_ms : now_ms();
+
+        arrow::Int64Builder ts_b;
+        arrow::StringBuilder instance_b;
+        arrow::Int32Builder batch_row_b;
+        arrow::StringBuilder version_b;
+        arrow::BooleanBuilder matched_b;
+        arrow::StringBuilder decision_b;
+        arrow::DoubleBuilder score_b;
+        arrow::StringBuilder risk_b;
+        arrow::StringBuilder rule_b;
+        for (int i = 0; i < n; ++i) {
+            (void) ts_b.Append(ts);
+            (void) instance_b.Append(config_.name);
+            (void) batch_row_b.Append(i);
+            (void) version_b.Append(result.rule_set_version);
+            (void) matched_b.Append(matched[static_cast<size_t>(i)] != 0);
+            (void) decision_b.Append(i < static_cast<int>(result.decisions.size()) ? result.decisions[i] : "APPROVE");
+            (void) score_b.Append(i < static_cast<int>(result.scores.size()) ? result.scores[i] : 0.0);
+            (void) risk_b.Append(i < static_cast<int>(result.risk_bands.size()) ? result.risk_bands[i] : "LOW");
+            (void) rule_b.Append(i < static_cast<int>(result.winning_rule_ids.size()) ? result.winning_rule_ids[i] : "");
+        }
+        std::vector<std::shared_ptr<arrow::Array>> arrays(9);
+        if (!ts_b.Finish(&arrays[0]).ok() || !instance_b.Finish(&arrays[1]).ok() ||
+            !batch_row_b.Finish(&arrays[2]).ok() || !version_b.Finish(&arrays[3]).ok() ||
+            !matched_b.Finish(&arrays[4]).ok() || !decision_b.Finish(&arrays[5]).ok() ||
+            !score_b.Finish(&arrays[6]).ok() || !risk_b.Finish(&arrays[7]).ok() ||
+            !rule_b.Finish(&arrays[8]).ok()) {
+            throw std::runtime_error("failed to build arrow decision batch");
+        }
+        auto batch = arrow::RecordBatch::Make(arrow_schema_, n, arrays);
+        std::lock_guard<std::mutex> lock(out_mu_);
+        arrow::Status status = arrow_writer_->WriteRecordBatch(*batch);
+        if (!status.ok()) throw std::runtime_error("failed to write arrow batch: " + status.ToString());
+    }
+
     void write_decisions(const BatchResult& result) {
+        if (arrow_writer_) {
+            write_decisions_arrow(result);
+            return;
+        }
         std::string buffer;
-        buffer.reserve(static_cast<size_t>(result.n_records) * 160);
+        buffer.reserve(static_cast<size_t>(result.n_records) * 224);
+        std::vector<uint8_t> matched(static_cast<size_t>(std::max(result.n_records, 0)), 0);
+        for (int32_t idx : result.matched_record_indices) {
+            if (idx >= 0 && idx < result.n_records) matched[static_cast<size_t>(idx)] = 1;
+        }
         for (int i = 0; i < result.n_records; ++i) {
             std::string decision = i < static_cast<int>(result.decisions.size()) ? result.decisions[i] : "APPROVE";
             std::string risk = i < static_cast<int>(result.risk_bands.size()) ? result.risk_bands[i] : "LOW";
@@ -280,6 +405,10 @@ private:
             buffer += json_escape(config_.name);
             buffer += "\",\"batch_row\":";
             buffer += std::to_string(i);
+            buffer += ",\"ruleset_version\":\"";
+            buffer += json_escape(result.rule_set_version);
+            buffer += "\",\"matched\":";
+            buffer += matched[static_cast<size_t>(i)] ? "true" : "false";
             buffer += ",\"decision\":\"";
             buffer += json_escape(decision);
             buffer += "\",\"score\":";
@@ -417,6 +546,9 @@ private:
     DedupeWindow dedupe_;
     std::ofstream out_file_;
     std::mutex out_mu_;
+    std::shared_ptr<arrow::io::OutputStream> arrow_sink_;
+    std::shared_ptr<arrow::ipc::RecordBatchWriter> arrow_writer_;
+    std::shared_ptr<arrow::Schema> arrow_schema_;
 };
 
 std::string str_node(const YAML::Node& n, const char* key, const std::string& fallback = {}) {
@@ -452,6 +584,19 @@ InstanceConfig parse_instance(const YAML::Node& n) {
     if (output.IsDefined()) {
         c.output.type = str_node(output, "type", c.output.type);
         c.output.path = str_node(output, "path", "");
+        c.output.dead_letter_path = str_node(output, "dead_letter_path", "");
+    }
+
+    YAML::Node models = n["models"];
+    if (models.IsSequence()) {
+        for (const auto& model : models) {
+            if (model.IsScalar()) {
+                c.models.push_back(model.as<std::string>());
+            } else if (model["name"].IsDefined() && model["path"].IsDefined()) {
+                c.models.push_back(model["name"].as<std::string>() + "=" +
+                                   model["path"].as<std::string>());
+            }
+        }
     }
 
     YAML::Node dedupe = n["dedupe"];
@@ -501,6 +646,8 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--flush-ms") opt.single.flush_ms = std::atoi(need("--flush-ms").c_str());
         else if (a == "--output") opt.single.output.type = need("--output");
         else if (a == "--output-path") opt.single.output.path = need("--output-path");
+        else if (a == "--dead-letter-path") opt.single.output.dead_letter_path = need("--dead-letter-path");
+        else if (a == "--model") opt.single.models.push_back(need("--model"));
         else if (a == "--service") opt.single.service = need("--service");
         else if (a == "--source") opt.single.source = need("--source");
         else if (a == "--dedupe-key") {
@@ -521,8 +668,10 @@ Options parse_args(int argc, char** argv) {
                 << "  --path PATH                 file_tail input path\n"
                 << "  --host HOST --port PORT     HTTP input bind, default 127.0.0.1:9480\n"
                 << "  --batch-size N              default 2048\n"
-                << "  --output stdout|ndjson      default stdout\n"
-                << "  --output-path PATH          output NDJSON path\n"
+                << "  --output stdout|ndjson|arrow  default stdout\n"
+                << "  --output-path PATH          output file path (NDJSON, or Arrow IPC when --output arrow)\n"
+                << "  --dead-letter-path PATH     write malformed/skipped records as NDJSON\n"
+                << "  --model name=PATH|s3://...  register ONNX model, repeatable\n"
                 << "  --dedupe-key FIELD          can be repeated\n";
             std::exit(0);
         } else {
