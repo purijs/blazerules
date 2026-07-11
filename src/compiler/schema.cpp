@@ -18,7 +18,8 @@ bool BlazeRulesSchema::has_field(const std::string& name) const {
 }
 
 int BlazeRulesSchema::index_of(const std::string& name) const {
-    return name_to_index_.find(name)->second;
+    auto it = name_to_index_.find(name);
+    return it == name_to_index_.end() ? -1 : it->second;
 }
 
 ColumnType BlazeRulesSchema::type_of(int index) const {

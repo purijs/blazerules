@@ -1490,6 +1490,19 @@ void RuleEngine::evaluate_internal_into(const std::shared_ptr<arrow::RecordBatch
     compute_vector_channels(*encoded, rs->vector_channels, vector_scores);
     result.timing.model_score_us = micros_since(stage);
 
+    result.model_outputs.clear();
+    for (size_t c = 0; c < rs->model_channels.size() && c < model_scores.size(); ++c) {
+        ModelChannelOutput channel_output;
+        channel_output.model_name = rs->model_channels[c].model_name;
+        channel_output.column_name = rs->model_channels[c].injected_name;
+        const std::vector<double>& src = model_scores[c];
+        channel_output.values.resize(src.size());
+        for (size_t r = 0; r < src.size(); ++r) {
+            channel_output.values[r] = static_cast<float>(src[r]);
+        }
+        result.model_outputs.push_back(std::move(channel_output));
+    }
+
     stage = std::chrono::steady_clock::now();
     // Map each derived-column slot to its computed per-row values. Window slots read from
     // `totals`, model slots from `model_scores`, vector slots from `vector_scores`. TS
@@ -1757,12 +1770,24 @@ void RuleEngine::reset_window_state() {
 
 void RuleEngine::register_model(const std::string& name, const std::string& path) {
     std::unique_lock<std::shared_mutex> state_lock(state_mutex_);
+    model_registry_.set_intra_op_threads(config_.model_intra_op_threads);
     model_registry_.register_model(name, path);
 }
 
 int RuleEngine::num_window_channels() const {
     auto rs = active_ruleset();
     return rs ? static_cast<int>(rs->window_channels.size()) : 0;
+}
+
+std::vector<std::pair<std::string, std::string>> RuleEngine::model_channel_columns() const {
+    std::vector<std::pair<std::string, std::string>> out;
+    auto rs = active_ruleset();
+    if (!rs) return out;
+    out.reserve(rs->model_channels.size());
+    for (const auto& mc : rs->model_channels) {
+        out.emplace_back(mc.model_name, mc.injected_name);
+    }
+    return out;
 }
 
 void RuleEngine::set_metrics_emitter(std::shared_ptr<MetricsEmitter> emitter) {

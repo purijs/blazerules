@@ -102,14 +102,24 @@ std::shared_ptr<arrow::RecordBatch> DictEncoder::encode_batch(
                             dictionary->IsNull(d) ? -1 : get_or_create(c, dictionary->GetView(d));
                     }
 
-                    auto buffer = arrow::AllocateBuffer(static_cast<int64_t>(n) * sizeof(int32_t)).ValueOrDie();
-                    auto* ids = reinterpret_cast<int32_t*>(buffer->mutable_data());
                     const int32_t* raw_indices = indices->raw_values();
+                    const int64_t dict_len = dictionary->length();
+                    arrow::Int32Builder dict_builder;
+                    (void)dict_builder.Reserve(n);
                     for (int i = 0; i < n; ++i) {
-                        ids[i] = mapped_dictionary[static_cast<size_t>(raw_indices[i])];
+                        // A null index slot, an out-of-range index, or an index that maps
+                        // to a null dictionary value (-1) all yield a null output slot —
+                        // preserving null-ness so IS_NULL / IN / lookup decisions stay correct.
+                        if (indices->IsNull(i)) { (void)dict_builder.AppendNull(); continue; }
+                        const int32_t di = raw_indices[i];
+                        if (di < 0 || di >= dict_len) { (void)dict_builder.AppendNull(); continue; }
+                        const int32_t code = mapped_dictionary[static_cast<size_t>(di)];
+                        if (code < 0) (void)dict_builder.AppendNull();
+                        else (void)dict_builder.Append(code);
                     }
-                    auto data = arrow::ArrayData::Make(arrow::int32(), n, {nullptr, std::move(buffer)}, 0);
-                    columns.push_back(arrow::MakeArray(data));
+                    std::shared_ptr<arrow::Array> dict_arr;
+                    (void)dict_builder.Finish(&dict_arr);
+                    columns.push_back(std::move(dict_arr));
                     continue;
                 }
             }

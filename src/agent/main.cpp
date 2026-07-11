@@ -114,6 +114,14 @@ std::optional<std::string> json_scalar_string(std::string_view line, std::string
     return trim(line.substr(p, e - p));
 }
 
+bool body_is_ndjson(std::string_view body) {
+    for (char c : body) {
+        if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+        return c == '{' || c == '[';
+    }
+    return false;
+}
+
 std::vector<std::string> split_lines(std::string_view body) {
     std::vector<std::string> out;
     size_t start = 0;
@@ -153,6 +161,9 @@ struct InstanceConfig {
     std::vector<std::string> models;
     int batch_size = 2048;
     int flush_ms = 1000;
+    int eval_shards = 1;
+    int s3_roll_mb = 64;
+    int s3_flush_seconds = 10;
     std::string service = "unknown";
     std::string source = "log";
     InputConfig input;
@@ -162,6 +173,8 @@ struct InstanceConfig {
 
 struct Options {
     std::string config_path;
+    std::string aws_region;
+    std::string aws_endpoint_url;
     InstanceConfig single;
 };
 
@@ -211,18 +224,48 @@ public:
         if (!config_.rules.empty()) {
             engine_.load_rules(config_.rules);
         }
-        if (config_.output.type == "ndjson" && !config_.output.path.empty()) {
-            out_file_.open(config_.output.path, std::ios::out | std::ios::app);
+        build_model_columns_from_engine();
+        arrow_output_ = (config_.output.type == "arrow");
+        const bool have_path = !config_.output.path.empty();
+        if (arrow_output_ && !have_path) {
+            throw std::runtime_error("arrow output requires an --output-path");
+        }
+        roll_bytes_ = static_cast<int64_t>(std::max(1, config_.s3_roll_mb)) * 1024 * 1024;
+        roll_ms_ = static_cast<int64_t>(std::max(1, config_.s3_flush_seconds)) * 1000;
+        if (have_path && blazerules::is_s3_uri(config_.output.path)) {
+            s3_output_ = true;
+            s3_prefix_ = config_.output.path;
+            if (s3_prefix_.back() != '/') s3_prefix_ += '/';
+            ext_ = arrow_output_ ? "arrow" : "ndjson";
+            staging_dir_ = blazerules::s3_local_cache_dir(config_.output.path) + "/staging";
+            std::error_code ec;
+            fs::create_directories(staging_dir_, ec);
+            run_id_ = now_ms();
+            part_start_ms_ = run_id_;
+            current_part_path_ = next_part_path();
+            if (!arrow_output_) open_ndjson_part();
+            s3_sync_thread_ = std::thread([this] { s3_sync_loop(); });
+        } else if (!arrow_output_ && have_path) {
+            out_file_.open(config_.output.path, std::ios::out | std::ios::trunc);
             if (!out_file_) throw std::runtime_error("failed to open output: " + config_.output.path);
-        } else if (config_.output.type == "arrow") {
-            if (config_.output.path.empty()) {
-                throw std::runtime_error("arrow output requires an --output-path file");
-            }
-            open_arrow_writer(config_.output.path);
         }
     }
 
     ~InstanceRunner() {
+        if (s3_output_) {
+            s3_stop_.store(true);
+            if (s3_sync_thread_.joinable()) s3_sync_thread_.join();
+            {
+                std::lock_guard<std::mutex> lock(out_mu_);
+                close_current_part();
+            }
+            // Final flush of the last rolled parts: retry so a transient failure on the
+            // very last sync doesn't silently drop the tail of the decision log.
+            for (int attempt = 0; attempt < 3; ++attempt) {
+                if (blazerules::s3_sync_up(staging_dir_, s3_prefix_)) break;
+            }
+            return;
+        }
         if (arrow_writer_) {
             (void) arrow_writer_->Close();
             arrow_writer_.reset();
@@ -240,8 +283,85 @@ public:
     }
 
 private:
-    void open_arrow_writer(const std::string& path) {
-        arrow_schema_ = arrow::schema({
+    void build_model_columns(const BatchResult& result) {
+        if (!model_columns_.empty() || result.model_outputs.empty()) return;
+        std::unordered_map<std::string, int> seen;
+        for (const auto& output : result.model_outputs) {
+            const int occurrence = seen[output.model_name]++;
+            std::string label = "model." + output.model_name;
+            if (occurrence > 0) label += "#" + std::to_string(occurrence);
+            model_columns_.push_back(label);
+        }
+    }
+
+    std::string next_part_path() {
+        std::string seq = std::to_string(part_seq_);
+        while (seq.size() < 6) seq = "0" + seq;
+        return staging_dir_ + "/" + config_.name + "-" + std::to_string(run_id_) + "-" + seq + "." + ext_;
+    }
+
+    std::string current_target_path() {
+        return s3_output_ ? current_part_path_ : config_.output.path;
+    }
+
+    void open_ndjson_part() {
+        out_file_.open(current_part_path_, std::ios::out | std::ios::trunc);
+        if (!out_file_) throw std::runtime_error("failed to open ndjson part: " + current_part_path_);
+    }
+
+    void close_current_part() {
+        if (arrow_output_) {
+            if (arrow_writer_) { (void) arrow_writer_->Close(); arrow_writer_.reset(); }
+            if (arrow_sink_) { (void) arrow_sink_->Close(); arrow_sink_.reset(); }
+        } else if (out_file_.is_open()) {
+            out_file_.flush();
+            out_file_.close();
+        }
+    }
+
+    void maybe_roll() {
+        if (!s3_output_) return;
+        const int64_t age = now_ms() - part_start_ms_;
+        if (part_bytes_ < roll_bytes_ && age < roll_ms_) return;
+        if (part_bytes_ == 0) { part_start_ms_ = now_ms(); return; }
+        const std::string finished = current_part_path_;
+        close_current_part();
+        {
+            std::lock_guard<std::mutex> lk(s3_mu_);
+            rolled_parts_.push_back(finished);
+        }
+        ++part_seq_;
+        part_bytes_ = 0;
+        part_start_ms_ = now_ms();
+        current_part_path_ = next_part_path();
+        if (!arrow_output_) open_ndjson_part();
+    }
+
+    void s3_sync_loop() {
+        while (!s3_stop_.load(std::memory_order_relaxed)) {
+            const int64_t step = std::max<int64_t>(50, roll_ms_ / 20);
+            for (int64_t waited = 0; waited < roll_ms_ && !s3_stop_.load(std::memory_order_relaxed); waited += step) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(step));
+            }
+            if (s3_stop_.load(std::memory_order_relaxed)) break;
+            std::vector<std::string> uploaded;
+            {
+                std::lock_guard<std::mutex> lk(s3_mu_);
+                uploaded = rolled_parts_;
+            }
+            if (!blazerules::s3_sync_up(staging_dir_, s3_prefix_)) continue;
+            std::lock_guard<std::mutex> lk(s3_mu_);
+            for (const std::string& p : uploaded) {
+                std::error_code ec;
+                fs::remove(p, ec);
+                auto it = std::find(rolled_parts_.begin(), rolled_parts_.end(), p);
+                if (it != rolled_parts_.end()) rolled_parts_.erase(it);
+            }
+        }
+    }
+
+    void build_arrow_schema() {
+        std::vector<std::shared_ptr<arrow::Field>> fields = {
             arrow::field("ts_ms", arrow::int64()),
             arrow::field("instance", arrow::utf8()),
             arrow::field("batch_row", arrow::int32()),
@@ -251,7 +371,15 @@ private:
             arrow::field("score", arrow::float64()),
             arrow::field("risk_band", arrow::utf8()),
             arrow::field("winning_rule_id", arrow::utf8()),
-        });
+        };
+        for (const std::string& column : model_columns_) {
+            fields.push_back(arrow::field(column, arrow::float64()));
+        }
+        arrow_schema_ = arrow::schema(fields);
+    }
+
+    void open_arrow_writer(const std::string& path) {
+        if (!arrow_schema_) build_arrow_schema();
         auto sink_result = arrow::io::FileOutputStream::Open(path);
         if (!sink_result.ok()) {
             throw std::runtime_error("failed to open arrow output: " + sink_result.status().ToString());
@@ -283,14 +411,86 @@ private:
         return engine_config;
     }
 
-    void register_models() {
+    void register_models() { register_models_on(engine_); }
+
+    void register_models_on(RuleEngine& engine) {
         for (const std::string& model : config_.models) {
             const size_t eq = model.find('=');
             if (eq == std::string::npos || eq == 0 || eq + 1 >= model.size()) {
                 throw std::runtime_error("--model must be name=path_or_s3_uri");
             }
-            engine_.register_model(model.substr(0, eq), model.substr(eq + 1));
+            engine.register_model(model.substr(0, eq), model.substr(eq + 1));
         }
+    }
+
+    void build_model_columns_from_engine() {
+        auto channels = engine_.model_channel_columns();
+        if (channels.empty() || !model_columns_.empty()) return;
+        std::unordered_map<std::string, int> seen;
+        for (const auto& channel : channels) {
+            const int occurrence = seen[channel.first]++;
+            std::string label = "model." + channel.first;
+            if (occurrence > 0) label += "#" + std::to_string(occurrence);
+            model_columns_.push_back(label);
+        }
+    }
+
+    // Build the shard pool lazily, after the first eval has bound the schema and
+    // compiled the ruleset (schema binding is deferred until first eval, so window
+    // channels are only known then). Only shards stateless rulesets with dedupe off.
+    void maybe_init_pool() {
+        if (config_.eval_shards <= 1) return;
+        std::call_once(pool_once_, [this] {
+            if (config_.dedupe.enabled) {
+                std::cerr << "instance '" << config_.name
+                          << "': --eval-shards ignored (dedupe is enabled); using 1 engine\n";
+                return;
+            }
+            if (!engine_.schema_bound() || engine_.num_window_channels() != 0) {
+                std::cerr << "instance '" << config_.name
+                          << "': --eval-shards ignored (ruleset uses windows or unbound schema); using 1 engine\n";
+                return;
+            }
+            shard_engines_ = engine_.create_shards(config_.eval_shards - 1);
+            std::vector<RuleEngine*> pool;
+            for (auto& shard : shard_engines_) {
+                shard->enable_metrics();
+                register_models_on(*shard);
+                pool.push_back(shard.get());
+            }
+            pool.push_back(&engine_);
+            {
+                std::lock_guard<std::mutex> lk(pool_mu_);
+                free_engines_ = std::move(pool);
+                pool_built_ = true;
+            }
+            std::cerr << "instance '" << config_.name << "': eval sharding ON with "
+                      << config_.eval_shards << " engines (stateless ruleset)\n";
+        });
+    }
+
+    RuleEngine* acquire_engine(bool& pooled) {
+        std::unique_lock<std::mutex> lk(pool_mu_);
+        if (!pool_built_) {
+            pooled = false;
+            return &engine_;
+        }
+        pool_cv_.wait(lk, [this] { return !free_engines_.empty(); });
+        RuleEngine* e = free_engines_.back();
+        free_engines_.pop_back();
+        pooled = true;
+        return e;
+    }
+
+    // Only engines actually taken from the pool are returned to it, so an engine
+    // acquired in the pre-build window (before the pool existed) is never double-listed.
+    void release_engine(RuleEngine* e, bool pooled) {
+        if (!pooled) return;
+        {
+            std::lock_guard<std::mutex> lk(pool_mu_);
+            free_engines_.push_back(e);
+        }
+        pool_cv_.notify_one();
     }
 
     std::string canonicalize(std::string_view line) {
@@ -313,6 +513,10 @@ private:
     }
 
     void submit_lines(const std::vector<std::string>& lines) {
+        uint64_t bytes_in = 0;
+        for (const auto& line : lines) bytes_in += line.size() + 1;
+        input_bytes_.fetch_add(bytes_in, std::memory_order_relaxed);
+        input_records_.fetch_add(lines.size(), std::memory_order_relaxed);
         std::vector<std::string> records;
         records.reserve(lines.size());
         for (const auto& line : lines) {
@@ -327,21 +531,81 @@ private:
         if (!records.empty()) evaluate(records);
     }
 
+    void write_input_stats() {
+        if (config_.output.path.empty()) return;
+        const int64_t now = now_ms();
+        {
+            std::lock_guard<std::mutex> lock(stats_mu_);
+            if (now - last_stats_ms_ < 1000) return;
+            last_stats_ms_ = now;
+        }
+        std::string stats = "{\"ts_ms\":";
+        stats += std::to_string(now_ms());
+        stats += ",\"input_bytes\":";
+        stats += std::to_string(input_bytes_.load(std::memory_order_relaxed));
+        stats += ",\"input_records\":";
+        stats += std::to_string(input_records_.load(std::memory_order_relaxed));
+        stats += "}\n";
+        std::lock_guard<std::mutex> lock(stats_mu_);
+        std::ofstream out(config_.output.path + ".stats", std::ios::out | std::ios::trunc);
+        if (out) out << stats;
+    }
+
+    // Surface evaluation failures (bad rules/lookups, schema mismatch) on the agent's
+    // own stderr instead of only in the per-request 500 body. Throttled via an atomic
+    // timestamp so a persistently failing config is visible without flooding the log,
+    // and off the evaluation hot path (only runs when an eval actually threw).
+    void log_eval_error(const std::string& what) {
+        const int64_t now = now_ms();
+        int64_t prev = last_error_log_ms_.load(std::memory_order_relaxed);
+        if (now - prev < 1000) return;
+        if (!last_error_log_ms_.compare_exchange_strong(prev, now, std::memory_order_relaxed)) return;
+        std::cerr << "instance '" << config_.name << "': evaluation error: " << what << "\n";
+    }
+
     void evaluate(const std::vector<std::string>& records) {
         if (records.empty()) return;
-        std::string ndjson;
-        size_t bytes = 0;
-        for (const auto& r : records) bytes += r.size() + 1;
-        ndjson.reserve(bytes);
-        for (const auto& r : records) {
-            ndjson += r;
-            ndjson += '\n';
+        bool pooled = false;
+        RuleEngine* e = acquire_engine(pooled);
+        BatchResult result;
+        try {
+            result = e->evaluate_messages(records);
+        } catch (...) {
+            release_engine(e, pooled);
+            throw;
         }
-        BatchResult result = engine_.evaluate_ndjson(ndjson);
+        release_engine(e, pooled);
         write_decisions(result);
+        write_input_stats();
+        maybe_init_pool();
+    }
+
+    void evaluate_body(const std::string& body) {
+        uint64_t records = 0;
+        for (char c : body) if (c == '\n') ++records;
+        if (!body.empty() && body.back() != '\n') ++records;
+        input_bytes_.fetch_add(body.size(), std::memory_order_relaxed);
+        input_records_.fetch_add(records, std::memory_order_relaxed);
+        bool pooled = false;
+        RuleEngine* e = acquire_engine(pooled);
+        BatchResult result;
+        try {
+            result = e->evaluate_ndjson(body);
+        } catch (...) {
+            release_engine(e, pooled);
+            throw;
+        }
+        release_engine(e, pooled);
+        write_decisions(result);
+        write_input_stats();
+        maybe_init_pool();
     }
 
     void write_decisions_arrow(const BatchResult& result) {
+        {
+            std::lock_guard<std::mutex> lock(out_mu_);
+            if (!arrow_schema_) build_arrow_schema();
+        }
         const int n = result.n_records;
         std::vector<uint8_t> matched(static_cast<size_t>(std::max(n, 0)), 0);
         for (int32_t idx : result.matched_record_indices) {
@@ -358,6 +622,10 @@ private:
         arrow::DoubleBuilder score_b;
         arrow::StringBuilder risk_b;
         arrow::StringBuilder rule_b;
+        std::vector<std::unique_ptr<arrow::DoubleBuilder>> model_b;
+        for (size_t c = 0; c < model_columns_.size(); ++c) {
+            model_b.push_back(std::make_unique<arrow::DoubleBuilder>());
+        }
         for (int i = 0; i < n; ++i) {
             (void) ts_b.Append(ts);
             (void) instance_b.Append(config_.name);
@@ -368,8 +636,15 @@ private:
             (void) score_b.Append(i < static_cast<int>(result.scores.size()) ? result.scores[i] : 0.0);
             (void) risk_b.Append(i < static_cast<int>(result.risk_bands.size()) ? result.risk_bands[i] : "LOW");
             (void) rule_b.Append(i < static_cast<int>(result.winning_rule_ids.size()) ? result.winning_rule_ids[i] : "");
+            for (size_t c = 0; c < model_b.size(); ++c) {
+                double v = (c < result.model_outputs.size() &&
+                            i < static_cast<int>(result.model_outputs[c].values.size()))
+                    ? static_cast<double>(result.model_outputs[c].values[static_cast<size_t>(i)])
+                    : 0.0;
+                (void) model_b[c]->Append(v);
+            }
         }
-        std::vector<std::shared_ptr<arrow::Array>> arrays(9);
+        std::vector<std::shared_ptr<arrow::Array>> arrays(9 + model_columns_.size());
         if (!ts_b.Finish(&arrays[0]).ok() || !instance_b.Finish(&arrays[1]).ok() ||
             !batch_row_b.Finish(&arrays[2]).ok() || !version_b.Finish(&arrays[3]).ok() ||
             !matched_b.Finish(&arrays[4]).ok() || !decision_b.Finish(&arrays[5]).ok() ||
@@ -377,18 +652,39 @@ private:
             !rule_b.Finish(&arrays[8]).ok()) {
             throw std::runtime_error("failed to build arrow decision batch");
         }
+        for (size_t c = 0; c < model_b.size(); ++c) {
+            if (!model_b[c]->Finish(&arrays[9 + c]).ok()) {
+                throw std::runtime_error("failed to build arrow model score column");
+            }
+        }
         auto batch = arrow::RecordBatch::Make(arrow_schema_, n, arrays);
         std::lock_guard<std::mutex> lock(out_mu_);
+        if (!arrow_writer_) open_arrow_writer(current_target_path());
         arrow::Status status = arrow_writer_->WriteRecordBatch(*batch);
         if (!status.ok()) throw std::runtime_error("failed to write arrow batch: " + status.ToString());
+        const int64_t now = now_ms();
+        if (now - last_flush_ms_ >= 200) {
+            (void) arrow_sink_->Flush();
+            last_flush_ms_ = now;
+        }
+        if (s3_output_) {
+            auto pos = arrow_sink_->Tell();
+            if (pos.ok()) part_bytes_ = *pos;
+            maybe_roll();
+        }
     }
 
     void write_decisions(const BatchResult& result) {
-        if (arrow_writer_) {
+        {
+            std::lock_guard<std::mutex> lock(out_mu_);
+            build_model_columns(result);
+        }
+        if (arrow_output_) {
             write_decisions_arrow(result);
             return;
         }
-        std::string buffer;
+        thread_local std::string buffer;
+        buffer.clear();
         buffer.reserve(static_cast<size_t>(result.n_records) * 224);
         std::vector<uint8_t> matched(static_cast<size_t>(std::max(result.n_records, 0)), 0);
         for (int32_t idx : result.matched_record_indices) {
@@ -417,12 +713,36 @@ private:
             buffer += json_escape(risk);
             buffer += "\",\"winning_rule_id\":\"";
             buffer += json_escape(rule);
-            buffer += "\"}\n";
+            buffer += "\"";
+            const size_t model_count = std::min(model_columns_.size(), result.model_outputs.size());
+            if (model_count > 0) {
+                buffer += ",\"model_scores\":{";
+                for (size_t c = 0; c < model_count; ++c) {
+                    if (c) buffer += ",";
+                    buffer += "\"";
+                    buffer += json_escape(model_columns_[c]);
+                    buffer += "\":";
+                    double v = i < static_cast<int>(result.model_outputs[c].values.size())
+                        ? static_cast<double>(result.model_outputs[c].values[static_cast<size_t>(i)])
+                        : 0.0;
+                    buffer += std::to_string(v);
+                }
+                buffer += "}";
+            }
+            buffer += "}\n";
         }
         std::lock_guard<std::mutex> lock(out_mu_);
         if (out_file_.is_open()) {
             out_file_ << buffer;
-            out_file_.flush();
+            const int64_t now = now_ms();
+            if (now - last_flush_ms_ >= 200) {
+                out_file_.flush();
+                last_flush_ms_ = now;
+            }
+            if (s3_output_) {
+                part_bytes_ += static_cast<int64_t>(buffer.size());
+                maybe_roll();
+            }
         } else {
             std::cout << buffer;
             std::cout.flush();
@@ -515,12 +835,17 @@ private:
         httplib::Server server;
         server.Post("/v1/logs", [&](const httplib::Request& req, httplib::Response& res) {
             try {
-                submit_lines(split_lines(req.body));
+                if (!config_.dedupe.enabled && body_is_ndjson(req.body)) {
+                    evaluate_body(req.body);
+                } else {
+                    submit_lines(split_lines(req.body));
+                }
                 res.set_content("{\"ok\":true}\n", "application/json");
             } catch (const std::exception& e) {
                 res.status = 500;
                 res.set_content(std::string("{\"ok\":false,\"error\":\"") + json_escape(e.what()) + "\"}\n",
                                 "application/json");
+                log_eval_error(e.what());
             }
         });
         server.Get("/healthz", [&](const httplib::Request&, httplib::Response& res) {
@@ -543,12 +868,41 @@ private:
 
     InstanceConfig config_;
     RuleEngine engine_;
+    std::vector<std::unique_ptr<RuleEngine>> shard_engines_;
+    std::mutex pool_mu_;
+    std::condition_variable pool_cv_;
+    std::vector<RuleEngine*> free_engines_;
+    std::once_flag pool_once_;
+    bool pool_built_ = false;
     DedupeWindow dedupe_;
     std::ofstream out_file_;
     std::mutex out_mu_;
+    std::mutex stats_mu_;
+    int64_t last_flush_ms_ = 0;
+    int64_t last_stats_ms_ = 0;
+    std::atomic<int64_t> last_error_log_ms_{0};
+    std::atomic<uint64_t> input_bytes_{0};
+    std::atomic<uint64_t> input_records_{0};
     std::shared_ptr<arrow::io::OutputStream> arrow_sink_;
     std::shared_ptr<arrow::ipc::RecordBatchWriter> arrow_writer_;
     std::shared_ptr<arrow::Schema> arrow_schema_;
+    std::vector<std::string> model_columns_;
+    bool arrow_output_ = false;
+    bool s3_output_ = false;
+    std::string s3_prefix_;
+    std::string staging_dir_;
+    std::string ext_;
+    std::string current_part_path_;
+    int64_t run_id_ = 0;
+    int64_t part_seq_ = 0;
+    int64_t part_start_ms_ = 0;
+    int64_t part_bytes_ = 0;
+    int64_t roll_bytes_ = 64 * 1024 * 1024;
+    int64_t roll_ms_ = 10000;
+    std::thread s3_sync_thread_;
+    std::atomic<bool> s3_stop_{false};
+    std::mutex s3_mu_;
+    std::vector<std::string> rolled_parts_;
 };
 
 std::string str_node(const YAML::Node& n, const char* key, const std::string& fallback = {}) {
@@ -569,6 +923,9 @@ InstanceConfig parse_instance(const YAML::Node& n) {
     c.rules = str_node(n, "rules", "");
     c.batch_size = int_node(n, "batch_size", 2048);
     c.flush_ms = int_node(n, "flush_ms", 1000);
+    c.eval_shards = int_node(n, "eval_shards", 1);
+    c.s3_roll_mb = int_node(n, "s3_roll_mb", 64);
+    c.s3_flush_seconds = int_node(n, "s3_flush_seconds", 10);
     c.service = str_node(n, "service", c.name);
     c.source = str_node(n, "source", "log");
 
@@ -644,10 +1001,15 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--port") opt.single.input.port = std::atoi(need("--port").c_str());
         else if (a == "--batch-size") opt.single.batch_size = std::atoi(need("--batch-size").c_str());
         else if (a == "--flush-ms") opt.single.flush_ms = std::atoi(need("--flush-ms").c_str());
+        else if (a == "--eval-shards") opt.single.eval_shards = std::atoi(need("--eval-shards").c_str());
         else if (a == "--output") opt.single.output.type = need("--output");
         else if (a == "--output-path") opt.single.output.path = need("--output-path");
         else if (a == "--dead-letter-path") opt.single.output.dead_letter_path = need("--dead-letter-path");
         else if (a == "--model") opt.single.models.push_back(need("--model"));
+        else if (a == "--s3-roll-mb") opt.single.s3_roll_mb = std::atoi(need("--s3-roll-mb").c_str());
+        else if (a == "--s3-flush-seconds") opt.single.s3_flush_seconds = std::atoi(need("--s3-flush-seconds").c_str());
+        else if (a == "--aws-region") opt.aws_region = need("--aws-region");
+        else if (a == "--aws-endpoint-url") opt.aws_endpoint_url = need("--aws-endpoint-url");
         else if (a == "--service") opt.single.service = need("--service");
         else if (a == "--source") opt.single.source = need("--source");
         else if (a == "--dedupe-key") {
@@ -668,10 +1030,15 @@ Options parse_args(int argc, char** argv) {
                 << "  --path PATH                 file_tail input path\n"
                 << "  --host HOST --port PORT     HTTP input bind, default 127.0.0.1:9480\n"
                 << "  --batch-size N              default 2048\n"
+                << "  --eval-shards N             parallel eval engines for stateless rulesets, default 1\n"
                 << "  --output stdout|ndjson|arrow  default stdout\n"
-                << "  --output-path PATH          output file path (NDJSON, or Arrow IPC when --output arrow)\n"
+                << "  --output-path PATH|s3://...  output file, or an s3:// prefix for rolled part objects\n"
                 << "  --dead-letter-path PATH     write malformed/skipped records as NDJSON\n"
                 << "  --model name=PATH|s3://...  register ONNX model, repeatable\n"
+                << "  --s3-roll-mb N              roll an s3 part after ~N MiB, default 64\n"
+                << "  --s3-flush-seconds N        roll + upload interval for s3 output, default 10\n"
+                << "  --aws-region REGION         AWS region for s3 (else AWS_REGION env)\n"
+                << "  --aws-endpoint-url URL      custom S3 endpoint (else AWS_ENDPOINT_URL env)\n"
                 << "  --dedupe-key FIELD          can be repeated\n";
             std::exit(0);
         } else {
@@ -694,6 +1061,8 @@ int main(int argc, char** argv) {
     std::signal(SIGTERM, handle_signal);
     try {
         Options opt = parse_args(argc, argv);
+        if (!opt.aws_region.empty()) blazerules::set_aws_region(opt.aws_region);
+        if (!opt.aws_endpoint_url.empty()) blazerules::set_aws_endpoint_url(opt.aws_endpoint_url);
         std::vector<InstanceConfig> configs = opt.config_path.empty()
             ? std::vector<InstanceConfig>{opt.single}
             : load_config(opt.config_path);

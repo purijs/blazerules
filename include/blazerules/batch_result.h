@@ -40,6 +40,12 @@ struct RecordExplanation {
     std::vector<RuleFiringExplanation> fired_rules;
 };
 
+struct ModelChannelOutput {
+    std::string model_name;
+    std::string column_name;
+    std::vector<float> values;
+};
+
 struct BatchResult {
     int n_records = 0;
     int n_matched = 0;
@@ -56,6 +62,7 @@ struct BatchResult {
     std::vector<std::string> winning_rule_ids;
     absl::flat_hash_map<std::string, std::vector<int32_t>> grouped_decision_indices;
     absl::flat_hash_map<std::string, std::vector<int32_t>> grouped_winning_rule_indices;
+    std::vector<ModelChannelOutput> model_outputs;
 
     std::string rule_set_version;
     int64_t evaluation_timestamp_ms = 0;

@@ -428,6 +428,7 @@ PYBIND11_MODULE(blazerules, m) {
         .def_readwrite("batch_size", &EngineConfig::batch_size)
         .def_readwrite("parallel_threshold", &EngineConfig::parallel_threshold)
         .def_readwrite("eval_thread_count", &EngineConfig::eval_thread_count)
+        .def_readwrite("model_intra_op_threads", &EngineConfig::model_intra_op_threads)
         .def_readwrite("trace_sample_rate", &EngineConfig::trace_sample_rate)
         .def_readwrite("output_detail", &EngineConfig::output_detail)
         .def_readwrite("max_window_entities", &EngineConfig::max_window_entities)
@@ -508,21 +509,21 @@ PYBIND11_MODULE(blazerules, m) {
                  if (it->second.empty()) return py::none();
                  return py::memoryview::from_memory(it->second.data(), it->second.size());
              },
-             py::arg("rule_id"))
+             py::arg("rule_id"), py::keep_alive<0, 1>())
         .def("matched_indices_buffer",
              [](BatchResult& r) -> py::object {
                  if (r.matched_record_indices.empty()) return py::none();
                  auto* ptr = reinterpret_cast<uint8_t*>(r.matched_record_indices.data());
                  return py::memoryview::from_memory(
                      ptr, r.matched_record_indices.size() * sizeof(int32_t));
-             })
+             }, py::keep_alive<0, 1>())
         .def("decision_codes_buffer",
              [](BatchResult& r) -> py::object {
                  if (r.decision_codes.empty()) return py::none();
                  auto* ptr = reinterpret_cast<uint8_t*>(r.decision_codes.data());
                  return py::memoryview::from_memory(
                      ptr, r.decision_codes.size() * sizeof(int32_t));
-             })
+             }, py::keep_alive<0, 1>())
         .def("indices_for_decision",
              [](const BatchResult& r, const std::string& decision) {
                  auto it = r.grouped_decision_indices.find(decision);
@@ -587,6 +588,51 @@ PYBIND11_MODULE(blazerules, m) {
                  for (const auto& [k, v] : r.error_counts) out[k] = v;
                  return out;
              })
+        .def_property_readonly("model_names",
+             [](const BatchResult& r) {
+                 std::vector<std::string> names;
+                 std::unordered_map<std::string, int> seen;
+                 for (const auto& mo : r.model_outputs) {
+                     int occ = seen[mo.model_name]++;
+                     std::string label = "model." + mo.model_name;
+                     if (occ > 0) label += "#" + std::to_string(occ);
+                     names.push_back(label);
+                 }
+                 return names;
+             },
+             "Model channel labels (model.<name>), matching the agent's Arrow columns / NDJSON model_scores keys.")
+        .def_property_readonly("model_scores",
+             [](const BatchResult& r) {
+                 py::dict out;
+                 std::unordered_map<std::string, int> seen;
+                 for (const auto& mo : r.model_outputs) {
+                     int occ = seen[mo.model_name]++;
+                     std::string label = "model." + mo.model_name;
+                     if (occ > 0) label += "#" + std::to_string(occ);
+                     out[py::str(label)] = py::array_t<float>(
+                         static_cast<py::ssize_t>(mo.values.size()), mo.values.data());
+                 }
+                 return out;
+             },
+             "Dict of model label -> per-record prediction ndarray (float32).")
+        .def("model_scores_buffer",
+             [](BatchResult& r, const std::string& model_name) -> py::object {
+                 std::unordered_map<std::string, int> seen;
+                 for (auto& mo : r.model_outputs) {
+                     int occ = seen[mo.model_name]++;
+                     std::string label = "model." + mo.model_name;
+                     if (occ > 0) label += "#" + std::to_string(occ);
+                     if (label == model_name || mo.model_name == model_name) {
+                         if (mo.values.empty()) return py::none();
+                         return py::memoryview::from_memory(
+                             reinterpret_cast<uint8_t*>(mo.values.data()),
+                             static_cast<py::ssize_t>(mo.values.size() * sizeof(float)));
+                     }
+                 }
+                 throw py::key_error(model_name);
+             },
+             py::arg("model_name"), py::keep_alive<0, 1>(),
+             "Zero-copy float32 memoryview of one model's per-record predictions (np.frombuffer(..., np.float32)).")
         .def_readonly("error_samples", &BatchResult::error_samples);
 
     py::class_<BacktestReport>(m, "BacktestReport")
@@ -889,6 +935,8 @@ PYBIND11_MODULE(blazerules, m) {
              ".onnx file path. XGBoost/LightGBM/scikit-learn/NN all export to ONNX. Requires "
              "an ONNX-enabled build; export classifiers with zipmap=False.")
         .def("num_models", &RuleEngine::num_models)
+        .def("model_channel_columns", &RuleEngine::model_channel_columns,
+             "List of (model_name, injected_column) for each model_score channel in the loaded ruleset.")
         .def("evaluate_ndjson_file",
              [](RuleEngine& e, const std::string& path) {
                  BatchResult result;

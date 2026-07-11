@@ -7,18 +7,72 @@
 #include <tuple>
 #include <utility>
 
+#include "blazerules/resource_resolver.h"
 #include "blazerules/version.h"
 #include "json_util.h"
 
 namespace fs = std::filesystem;
 
+namespace {
+
+std::string decision_local_root(const Options& o) {
+    if (!o.decision_log_dir.empty()) {
+        return blazerules::is_s3_uri(o.decision_log_dir)
+            ? blazerules::s3_local_cache_dir(o.decision_log_dir)
+            : o.decision_log_dir;
+    }
+    if (!o.decision_log.empty()) {
+        if (!blazerules::is_s3_uri(o.decision_log)) return o.decision_log;
+        std::string base = o.decision_log.substr(o.decision_log.find_last_of('/') + 1);
+        if (base.empty()) base = "decision.log";
+        return blazerules::s3_local_cache_dir(o.decision_log) + "/" + base;
+    }
+    return "";
+}
+
+// Dead-letter source: an explicit --dead-letter-log wins; otherwise auto-read the
+// dlq files from the decision-log directory (its local cache when that dir is s3).
+std::string dead_letter_root(const Options& o) {
+    if (!o.dead_letter_log.empty()) return o.dead_letter_log;
+    if (!o.decision_log_dir.empty()) return decision_local_root(o);
+    return "";
+}
+
+bool dead_letter_is_dir(const Options& o) {
+    return o.dead_letter_log.empty() && !o.decision_log_dir.empty();
+}
+
+std::string rules_dir_local(const Options& o) {
+    if (o.rules_dir.empty()) return "";
+    return blazerules::is_s3_uri(o.rules_dir) ? blazerules::s3_local_cache_dir(o.rules_dir) : o.rules_dir;
+}
+
+}  // namespace
+
 DashboardServer::DashboardServer(Options options)
     : options_(std::move(options)),
-      decision_tailer_(options_.decision_log, options_.tail_lines, options_.max_index_rows),
-      dead_letter_tailer_(options_.dead_letter_log, options_.tail_lines),
+      decision_tailer_(decision_local_root(options_),
+                       !options_.decision_log_dir.empty(),
+                       options_.tail_lines, options_.max_index_rows),
+      dead_letter_tailer_(dead_letter_root(options_), dead_letter_is_dir(options_), options_.tail_lines),
       metrics_scraper_(options_.metrics_url),
       benchmark_reader_(options_.results_jsonl),
-      ruleset_reader_(options_.rules_path, options_.candidate_rules_path, options_.rules_history_dir) {}
+      ruleset_reader_(options_.rules_path, rules_dir_local(options_),
+                      options_.candidate_rules_path, options_.rules_history_dir) {
+    if (!options_.decision_log_dir.empty() && blazerules::is_s3_uri(options_.decision_log_dir)) {
+        s3_source_ = options_.decision_log_dir;
+        s3_source_is_dir_ = true;
+        s3_local_root_ = decision_local_root(options_);
+    } else if (!options_.decision_log.empty() && blazerules::is_s3_uri(options_.decision_log)) {
+        s3_source_ = options_.decision_log;
+        s3_source_is_dir_ = false;
+        s3_local_root_ = decision_local_root(options_);
+    }
+    if (!options_.rules_dir.empty() && blazerules::is_s3_uri(options_.rules_dir)) {
+        s3_rules_source_ = options_.rules_dir;
+        s3_rules_local_ = rules_dir_local(options_);
+    }
+}
 
 DashboardServer::~DashboardServer() {
     stop();
@@ -66,26 +120,44 @@ std::string DashboardServer::health_json() const {
     return out;
 }
 
-std::string DashboardServer::summary_json() const {
+std::string DashboardServer::summary_json(const std::string& instance) const {
     auto s = snapshot();
-    double records = metric_value(s.metrics, "blazerules_records_evaluated_total");
-    double batches = metric_value(s.metrics, "blazerules_batches_evaluated_total");
-    double skipped = metric_value(s.metrics, "blazerules_records_skipped_total");
-    double matched = metric_value(s.metrics, "blazerules_records_matched_total");
-    if (records == 0.0 && s.decisions.rows_seen > 0) {
-        records = static_cast<double>(s.decisions.rows_seen);
-        matched = static_cast<double>(s.decisions.matched_seen);
-    }
-    if (skipped == 0.0 && s.errors.rows_seen > 0) {
-        skipped = static_cast<double>(s.errors.rows_seen);
+    const bool scoped = !instance.empty();
+    DecisionState scoped_state;
+    if (scoped) scoped_state = decision_tailer_.scoped_state(instance);
+    const DecisionState& dec = scoped ? scoped_state : s.decisions;
+    double records = 0.0;
+    double batches = 0.0;
+    double skipped = 0.0;
+    double matched = 0.0;
+    if (scoped) {
+        records = static_cast<double>(dec.rows_seen);
+        matched = static_cast<double>(dec.matched_seen);
+    } else {
+        records = metric_value(s.metrics, "blazerules_records_evaluated_total");
+        batches = metric_value(s.metrics, "blazerules_batches_evaluated_total");
+        skipped = metric_value(s.metrics, "blazerules_records_skipped_total");
+        matched = metric_value(s.metrics, "blazerules_records_matched_total");
+        if (records == 0.0 && s.decisions.rows_seen > 0) {
+            records = static_cast<double>(s.decisions.rows_seen);
+            matched = static_cast<double>(s.decisions.matched_seen);
+        }
+        if (skipped == 0.0 && s.errors.rows_seen > 0) {
+            skipped = static_cast<double>(s.errors.rows_seen);
+        }
     }
     double match_rate = records > 0.0 ? matched / records : 0.0;
     double total_ms = histogram_mean_us(s.metrics, "blazerules_batch_total_latency_us") / 1000.0;
     double eval_ms = histogram_mean_us(s.metrics, "blazerules_batch_evaluation_latency_us") / 1000.0;
     double transpose_ms = histogram_mean_us(s.metrics, "blazerules_batch_transpose_latency_us") / 1000.0;
     uintmax_t decision_log_bytes = 0;
-    auto decision_source = s.sources.find("decision_log");
-    if (decision_source != s.sources.end()) decision_log_bytes = decision_source->second.bytes;
+    if (scoped) {
+        auto lb = s.decisions.instance_log_bytes.find(instance);
+        if (lb != s.decisions.instance_log_bytes.end()) decision_log_bytes = static_cast<uintmax_t>(lb->second);
+    } else {
+        auto decision_source = s.sources.find("decision_log");
+        if (decision_source != s.sources.end()) decision_log_bytes = decision_source->second.bytes;
+    }
     std::string active_version;
     if (!s.decisions.ruleset_versions.empty()) active_version = *s.decisions.ruleset_versions.rbegin();
 
@@ -110,13 +182,15 @@ std::string DashboardServer::summary_json() const {
     out += ",";
     out += json_pair("recent_bytes_per_sec", s.recent_bytes_per_sec);
     out += ",";
-    out += json_pair("recent_log_records", s.decisions.rows_seen);
+    out += json_pair("recent_input_bytes_per_sec", s.recent_input_bytes_per_sec);
+    out += ",";
+    out += json_pair("recent_log_records", dec.rows_seen);
     out += ",";
     out += json_pair("decision_log_bytes", static_cast<double>(decision_log_bytes));
     out += ",";
     out += json_bool_pair("has_metrics", !s.metrics.entries.empty());
     out += ",";
-    out += json_pair("avg_score_recent", s.decisions.avg_score);
+    out += json_pair("avg_score_recent", dec.avg_score);
     out += "},\"timing_ms\":{";
     out += json_pair("total", total_ms);
     out += ",";
@@ -124,9 +198,11 @@ std::string DashboardServer::summary_json() const {
     out += ",";
     out += json_pair("transpose", transpose_ms);
     out += "},\"decision_counts\":";
-    out += map_to_json(s.decisions.decision_counts);
+    out += map_to_json(dec.decision_counts);
     out += ",\"risk_band_counts\":";
-    out += map_to_json(s.decisions.risk_band_counts);
+    out += map_to_json(dec.risk_band_counts);
+    out += ",\"instance_counts\":";
+    out += map_to_json(s.decisions.instance_counts);
     out += ",\"history\":[";
     for (size_t i = 0; i < s.history.size(); ++i) {
         if (i) out += ",";
@@ -197,6 +273,8 @@ std::string decisions_payload(const DecisionQueryResult& result, const DecisionQ
     out += facet_json(result.decision_facets);
     out += ",\"risk_band_facets\":";
     out += facet_json(result.risk_band_facets);
+    out += ",\"instance_facets\":";
+    out += facet_json(result.instance_facets);
     out += ",\"rows\":[";
     for (size_t i = 0; i < result.rows.size(); ++i) {
         if (i) out += ",";
@@ -205,6 +283,8 @@ std::string decisions_payload(const DecisionQueryResult& result, const DecisionQ
         out += json_pair("ts_ms", r.ts_ms);
         out += ",";
         out += json_pair("ruleset_version", r.ruleset_version);
+        out += ",";
+        out += json_pair("instance", r.instance);
         out += ",";
         out += json_pair("batch_row", r.batch_row);
         out += ",";
@@ -217,6 +297,12 @@ std::string decisions_payload(const DecisionQueryResult& result, const DecisionQ
         out += json_pair("risk_band", r.risk_band);
         out += ",";
         out += json_pair("winning_rule_id", r.winning_rule_id);
+        out += ",\"model_scores\":{";
+        for (size_t m = 0; m < r.model_scores.size(); ++m) {
+            if (m) out += ",";
+            out += json_pair(r.model_scores[m].first, r.model_scores[m].second);
+        }
+        out += "}";
         out += "}";
     }
     out += "]}";
@@ -230,8 +316,45 @@ std::string DashboardServer::decisions_json(const DecisionQuery& query) const {
     return decisions_payload(result, query);
 }
 
-std::string DashboardServer::rules_json(size_t limit) const {
+std::string DashboardServer::models_json(int bins, const std::string& instance) const {
+    std::vector<ModelHistogram> models = decision_tailer_.model_histograms(bins, instance);
+    std::string out = "{\"models\":[";
+    for (size_t i = 0; i < models.size(); ++i) {
+        if (i) out += ",";
+        const ModelHistogram& m = models[i];
+        out += "{";
+        out += json_pair("name", m.name);
+        out += ",";
+        out += json_pair("count", static_cast<double>(m.count));
+        out += ",";
+        out += json_pair("min", m.min);
+        out += ",";
+        out += json_pair("max", m.max);
+        out += ",";
+        out += json_pair("mean", m.mean);
+        out += ",\"bins\":[";
+        for (size_t b = 0; b < m.bins.size(); ++b) {
+            if (b) out += ",";
+            out += "{";
+            out += json_pair("lo", m.bins[b].lo);
+            out += ",";
+            out += json_pair("hi", m.bins[b].hi);
+            out += ",";
+            out += json_pair("count", static_cast<double>(m.bins[b].count));
+            out += "}";
+        }
+        out += "]}";
+    }
+    out += "]}";
+    return out;
+}
+
+std::string DashboardServer::rules_json(size_t limit, const std::string& instance) const {
     auto s = snapshot();
+    DecisionState scoped_state;
+    if (!instance.empty()) scoped_state = decision_tailer_.scoped_state(instance);
+    const auto& winning_counts = instance.empty() ? s.decisions.winning_rule_counts
+                                                   : scoped_state.winning_rule_counts;
     struct RuleRow {
         std::string id;
         double fired = 0.0;
@@ -239,22 +362,25 @@ std::string DashboardServer::rules_json(size_t limit) const {
         int64_t winning_total = 0;
     };
     std::map<std::string, RuleRow> rows;
-    for (const auto& entry : s.metrics.entries) {
-        auto it = entry.labels.find("rule_id");
-        if (it == entry.labels.end()) continue;
-        auto& row = rows[it->second];
-        row.id = it->second;
-        if (entry.name == "blazerules_rule_fired_total") row.fired = entry.value;
-        if (entry.name == "blazerules_rule_fire_rate") row.fire_rate = entry.value;
+    if (instance.empty()) {
+        for (const auto& entry : s.metrics.entries) {
+            auto it = entry.labels.find("rule_id");
+            if (it == entry.labels.end()) continue;
+            auto& row = rows[it->second];
+            row.id = it->second;
+            if (entry.name == "blazerules_rule_fired_total") row.fired = entry.value;
+            if (entry.name == "blazerules_rule_fire_rate") row.fire_rate = entry.value;
+        }
     }
-    for (const auto& [rule_id, count] : s.decisions.winning_rule_counts) {
+    for (const auto& [rule_id, count] : winning_counts) {
         auto& row = rows[rule_id];
         row.id = rule_id;
         row.winning_total = count;
         if (row.fired == 0.0) row.fired = static_cast<double>(count);
     }
-    double denominator = s.decisions.rows_seen > 0
-        ? static_cast<double>(s.decisions.rows_seen)
+    const int64_t denom_rows = instance.empty() ? s.decisions.rows_seen : scoped_state.rows_seen;
+    double denominator = denom_rows > 0
+        ? static_cast<double>(denom_rows)
         : metric_value(s.metrics, "blazerules_records_evaluated_total");
     std::vector<RuleRow> vec;
     for (auto& [_, row] : rows) {
@@ -406,9 +532,17 @@ std::string DashboardServer::benchmarks_json() const {
     return out;
 }
 
-std::string DashboardServer::ruleset_json() const {
+std::string DashboardServer::ruleset_json(const std::string& selector) const {
     auto s = snapshot();
-    const auto& r = s.ruleset;
+    RulesetState scoped;
+    const bool use_scope = !selector.empty() && (!options_.rules_dir.empty() || !options_.rules_path.empty());
+    if (use_scope) {
+        scoped = ruleset_reader_.ruleset_for(selector);
+        scoped.candidate_path = s.ruleset.candidate_path;
+        scoped.candidate_configured = s.ruleset.candidate_configured;
+        scoped.versions = s.ruleset.versions;
+    }
+    const RulesetState& r = use_scope ? scoped : s.ruleset;
     std::string out = "{";
     out += json_pair("active_path", r.active_path);
     out += ",";
@@ -481,6 +615,14 @@ std::string DashboardServer::ruleset_json() const {
         out += json_pair("error", v.error);
         out += "}";
     }
+    out += "],\"names\":[";
+    const std::vector<std::string> names = ruleset_reader_.ruleset_names();
+    for (size_t i = 0; i < names.size(); ++i) {
+        if (i) out += ",";
+        out += "\"";
+        out += json_escape(names[i]);
+        out += "\"";
+    }
     out += "]}";
     return out;
 }
@@ -488,6 +630,16 @@ std::string DashboardServer::ruleset_json() const {
 void DashboardServer::refresh_once() {
     DashboardSnapshot next;
     next.last_update_ms = now_ms();
+
+    if (!s3_source_.empty() || !s3_rules_source_.empty()) {
+        const int64_t now = now_ms();
+        if (now - last_s3_sync_ms_ >= 3000) {
+            last_s3_sync_ms_ = now;
+            if (s3_source_is_dir_) blazerules::s3_sync_down(s3_source_, s3_local_root_);
+            else if (!s3_source_.empty()) blazerules::s3_download_file(s3_source_, s3_local_root_);
+            if (!s3_rules_source_.empty()) blazerules::s3_sync_down(s3_rules_source_, s3_rules_local_);
+        }
+    }
 
     SourceStatus decision_source;
     next.decisions = decision_tailer_.update(decision_source);
@@ -529,6 +681,21 @@ void DashboardServer::refresh_once() {
     }
     last_decision_log_bytes_ = decision_log_bytes;
     last_decision_log_bytes_ms_ = next.last_update_ms;
+
+    if (!options_.decision_log.empty()) {
+        std::ifstream stats_in(options_.decision_log + ".stats");
+        std::string stats_line;
+        if (stats_in && std::getline(stats_in, stats_line)) {
+            double input_bytes = json_number(stats_line, "input_bytes").value_or(0.0);
+            if (last_input_bytes_ms_ > 0 && next.last_update_ms > last_input_bytes_ms_ &&
+                input_bytes >= last_input_bytes_) {
+                next.recent_input_bytes_per_sec = (input_bytes - last_input_bytes_) * 1000.0 /
+                                                  static_cast<double>(next.last_update_ms - last_input_bytes_ms_);
+            }
+            last_input_bytes_ = input_bytes;
+            last_input_bytes_ms_ = next.last_update_ms;
+        }
+    }
 
     HistoryPoint hp;
     hp.ts_ms = next.last_update_ms;

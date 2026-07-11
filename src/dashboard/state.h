@@ -19,12 +19,14 @@ struct SourceStatus {
 struct DecisionRow {
     int64_t ts_ms = 0;
     std::string ruleset_version;
+    std::string instance;
     int64_t batch_row = 0;
     bool matched = false;
     std::string decision;
     double score = 0.0;
     std::string risk_band;
     std::string winning_rule_id;
+    std::vector<std::pair<std::string, double>> model_scores;
 };
 
 struct DecisionState {
@@ -32,6 +34,8 @@ struct DecisionState {
     std::map<std::string, int64_t> decision_counts;
     std::map<std::string, int64_t> risk_band_counts;
     std::map<std::string, int64_t> winning_rule_counts;
+    std::map<std::string, int64_t> instance_counts;
+    std::map<std::string, int64_t> instance_log_bytes;
     std::set<std::string> ruleset_versions;
     int64_t rows_seen = 0;
     int64_t matched_seen = 0;
@@ -151,6 +155,22 @@ struct DashboardSnapshot {
     std::vector<HistoryPoint> history;
     double recent_rps = 0.0;
     double recent_bytes_per_sec = 0.0;
+    double recent_input_bytes_per_sec = 0.0;
+};
+
+struct ModelHistogramBin {
+    double lo = 0.0;
+    double hi = 0.0;
+    int64_t count = 0;
+};
+
+struct ModelHistogram {
+    std::string name;
+    int64_t count = 0;
+    double min = 0.0;
+    double max = 0.0;
+    double mean = 0.0;
+    std::vector<ModelHistogramBin> bins;
 };
 
 struct DecisionQuery {
@@ -160,6 +180,7 @@ struct DecisionQuery {
     std::string decision;
     std::string risk_band;
     std::string rule;
+    std::string instance;
     int64_t from_ms = 0;
     int64_t to_ms = 0;
 };
@@ -171,6 +192,7 @@ struct DecisionQueryResult {
     bool truncated = false;
     std::map<std::string, int64_t> decision_facets;
     std::map<std::string, int64_t> risk_band_facets;
+    std::map<std::string, int64_t> instance_facets;
 };
 
 struct Options {
@@ -180,10 +202,14 @@ struct Options {
     size_t tail_lines = 5000;
     size_t max_index_rows = 5000000;
     std::string decision_log;
+    std::string decision_log_dir;
     std::string dead_letter_log;
     std::string metrics_url;
     std::string results_jsonl;
     std::string rules_path;
+    std::string rules_dir;
     std::string candidate_rules_path;
     std::string rules_history_dir;
+    std::string aws_region;
+    std::string aws_endpoint_url;
 };

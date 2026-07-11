@@ -1,5 +1,6 @@
 #include "blazerules/model_registry.h"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <stdexcept>
@@ -13,6 +14,9 @@
 
 #ifdef BLAZERULES_ENABLE_ONNX
 #include <array>
+#include <cstdio>
+#include <fcntl.h>
+#include <unistd.h>
 #include <onnxruntime/onnxruntime_cxx_api.h>
 #endif
 
@@ -72,6 +76,26 @@ Ort::Env& ort_env() {
     return env;
 }
 
+struct StderrSilencer {
+    int saved_fd;
+    StderrSilencer() : saved_fd(-1) {
+        std::fflush(stderr);
+        saved_fd = ::dup(STDERR_FILENO);
+        int devnull = ::open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            ::dup2(devnull, STDERR_FILENO);
+            ::close(devnull);
+        }
+    }
+    ~StderrSilencer() {
+        std::fflush(stderr);
+        if (saved_fd >= 0) {
+            ::dup2(saved_fd, STDERR_FILENO);
+            ::close(saved_fd);
+        }
+    }
+};
+
 #endif  // BLAZERULES_ENABLE_ONNX
 
 }  // namespace
@@ -84,12 +108,13 @@ void ModelRegistry::register_model(const std::string& name, const std::string& p
         "register_model / model_score requires building with BLAZERULES_ENABLE_ONNX");
 #else
     Ort::SessionOptions opts;
-    opts.SetIntraOpNumThreads(1);
+    opts.SetIntraOpNumThreads(std::max(1, intra_op_threads_));
     opts.SetGraphOptimizationLevel(GraphOptimizationLevel::ORT_ENABLE_ALL);
 
     auto model = std::make_shared<CompiledModel>();
     std::string local_path = blazerules::resolve_resource_to_local(path);
     try {
+        StderrSilencer silence;
         model->session = Ort::Session(ort_env(), local_path.c_str(), opts);
     } catch (const Ort::Exception& e) {
         throw std::runtime_error("model '" + name + "': failed to load ONNX: " + e.what());
@@ -120,6 +145,11 @@ void ModelRegistry::register_model(const std::string& name, const std::string& p
     std::lock_guard<std::mutex> lock(mutex_);
     models_[name] = std::move(model);
 #endif
+}
+
+void ModelRegistry::set_intra_op_threads(int threads) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    intra_op_threads_ = threads;
 }
 
 bool ModelRegistry::contains(const std::string& name) const {
@@ -193,7 +223,14 @@ void ModelRegistry::score_all_channels(const arrow::RecordBatch& batch,
         if (outputs.empty() || !outputs[0].IsTensor()) continue;
 
         auto info = outputs[0].GetTensorTypeAndShapeInfo();
+        // Only float32 tensors are read directly. A non-float output (e.g. an int64
+        // class label at output 0 from skl2onnx) would be byte-reinterpreted as float
+        // and yield garbage scores — skip it (channel stays 0) rather than mislead.
+        if (info.GetElementType() != ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT) continue;
         int64_t total = info.GetElementCount();
+        // Require at least one element per row so the (row*width + width-1) index below
+        // never reads past the tensor when a model returns fewer elements than rows.
+        if (total < n) continue;
         int width = (n > 0) ? static_cast<int>(total / n) : 1;
         if (width < 1) width = 1;
         const float* od = outputs[0].GetTensorMutableData<float>();

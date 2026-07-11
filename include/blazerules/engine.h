@@ -42,6 +42,10 @@ struct EngineConfig {
 
     int eval_thread_count = 0;
     int parallel_threshold = 1000;
+    // ONNX intra-op threads per model session. Default 1 avoids oversubscription
+    // when many shards each run inference concurrently; raise for a single-engine
+    // ONNX-heavy workload to let one Run() use idle cores.
+    int model_intra_op_threads = 1;
 
     enum TraceMode { TRACE_NONE, TRACE_SAMPLED, TRACE_ALL };
     TraceMode trace_mode = TRACE_NONE;
@@ -273,6 +277,7 @@ public:
     bool schema_bound() const { return schema_state_ != SchemaState::UNBOUND; }
     SchemaState schema_state() const { return schema_state_; }
     int num_window_channels() const;
+    std::vector<std::pair<std::string, std::string>> model_channel_columns() const;
 
 private:
     BatchResult evaluate_internal(const std::shared_ptr<arrow::RecordBatch>& base,

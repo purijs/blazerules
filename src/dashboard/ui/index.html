@@ -14,6 +14,7 @@
   <button class="navbtn active" data-tab="overview">Overview</button>
   <button class="navbtn" data-tab="logs">Event Timeline</button>
   <button class="navbtn" data-tab="rules">Rule Fire Rates</button>
+  <button class="navbtn" data-tab="models">Models</button>
   <button class="navbtn" data-tab="ruleset">Ruleset Visualizer</button>
   <button class="navbtn" data-tab="errors">Errors / DLQ</button>
   <button class="navbtn" data-tab="system">System</button>
@@ -21,6 +22,7 @@
 <main>
 <header>
   <input id="filter" class="search" placeholder="Filter visible tables by decision, rule, error, or source">
+  <div class="scopebox"><span class="scopelabel">Ruleset</span><select id="scopeInstance" class="scopesel"><option value="">All rulesets</option></select></div>
   <div class="topmeta"><span id="topline">Loading...</span><span class="status"><span class="dot" id="healthdot"></span><span id="healthtext">starting</span></span></div>
 </header>
 <div class="wrap">
@@ -34,13 +36,15 @@
           <div id="timelineBars" class="timeline-bars"></div>
           <svg id="spark"></svg>
           <div class="axis-note">recent polling window</div>
+          <div id="timelineHint" class="axis-note mono"></div>
         </div>
       </div>
       <div class="panel span5"><h2>Decision Distribution</h2><div class="scroll"><table><thead><tr><th>Decision</th><th>Count</th><th>Share</th></tr></thead><tbody id="decisionDist"></tbody></table></div></div>
     </div>
     <div class="grid">
-      <div class="panel span6"><h2>Latency Breakdown</h2><div class="bars" id="latencyBars"></div></div>
-      <div class="panel span6"><h2>Top Winning Rules</h2><div class="scroll"><table><thead><tr><th>Rule</th><th>Winning Recent</th></tr></thead><tbody id="winningRows"></tbody></table></div></div>
+      <div class="panel span4"><h2>Instances / Rulesets</h2><div class="scroll"><table><thead><tr><th>Instance</th><th>Records</th><th>Share</th></tr></thead><tbody id="instanceRows"></tbody></table></div></div>
+      <div class="panel span4"><h2>Latency Breakdown</h2><div class="bars" id="latencyBars"></div></div>
+      <div class="panel span4"><h2>Top Winning Rules</h2><div class="scroll"><table><thead><tr><th>Rule</th><th>Winning Recent</th></tr></thead><tbody id="winningRows"></tbody></table></div></div>
     </div>
   </section>
 
@@ -78,8 +82,19 @@
     </div>
     <div class="grid">
       <div class="panel span3"><h2>Facets</h2><div class="facets" id="logFacets"></div></div>
-      <div class="panel span9"><h2>Recent Decision Events</h2><div class="scroll tall"><table><thead><tr><th>Time</th><th>Matched</th><th>Decision</th><th>Score</th><th>Risk</th><th>Winning Rule</th><th>Ruleset</th></tr></thead><tbody id="decisionRows"></tbody></table></div></div>
+      <div class="panel span9"><h2>Recent Decision Events</h2><div class="scroll tall"><table><thead><tr><th>Time</th><th>Instance</th><th>Matched</th><th>Decision</th><th>Score</th><th>Risk</th><th>Winning Rule</th><th>Ruleset</th></tr></thead><tbody id="decisionRows"></tbody></table></div></div>
     </div>
+  </section>
+
+  <section id="models" class="view">
+    <div class="panel filters">
+      <div class="filter-actions">
+        <button id="refreshModels" type="button">Refresh</button>
+      </div>
+      <div class="pager"><span id="modelHint" class="mono">Scope with the Ruleset selector in the header</span></div>
+    </div>
+    <div class="grid" id="modelCards"></div>
+    <div class="panel"><h2>Recent Predictions</h2><div class="scroll tall"><table><thead id="modelTableHead"></thead><tbody id="modelTableBody"></tbody></table></div></div>
   </section>
 
   <section id="rules" class="view">

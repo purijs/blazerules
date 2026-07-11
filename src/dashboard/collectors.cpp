@@ -1,9 +1,12 @@
 #include "collectors.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <shared_mutex>
 #include <sstream>
 #include <tuple>
 #include <utility>
@@ -13,16 +16,21 @@
 #include <arrow/ipc/api.h>
 #include <httplib.h>
 
+#include "blazerules/resource_resolver.h"
 #include "json_util.h"
 
 namespace fs = std::filesystem;
 
-DecisionLogTailer::DecisionLogTailer(std::string path, size_t tail_lines, size_t index_capacity)
-    : path_(std::move(path)), tail_lines_(tail_lines),
-      dict_memo_(std::make_unique<arrow::ipc::DictionaryMemo>()),
+DecisionLogTailer::DecisionLogTailer(std::string root, bool is_dir, size_t tail_lines, size_t index_capacity)
+    : root_(std::move(root)), is_dir_(is_dir), tail_lines_(tail_lines),
       index_capacity_(index_capacity) {}
 
 DecisionLogTailer::~DecisionLogTailer() = default;
+
+std::vector<std::string> DecisionLogTailer::model_columns() const {
+    std::shared_lock<std::shared_mutex> lock(index_mu_);
+    return model_columns_;
+}
 
 namespace {
 
@@ -30,6 +38,44 @@ bool is_actioned_decision(const DecisionRow& row) {
     if (row.matched) return true;
     if (!row.winning_rule_id.empty()) return true;
     return row.decision == "BLOCK" || row.decision == "REVIEW" || row.decision == "FLAG";
+}
+
+bool looks_like_dead_letter(const std::string& filename) {
+    std::string low;
+    low.reserve(filename.size());
+    for (char c : filename) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return low.find("dlq") != std::string::npos ||
+           low.find("dead_letter") != std::string::npos ||
+           low.find("dead-letter") != std::string::npos ||
+           low.find("deadletter") != std::string::npos;
+}
+
+void parse_ndjson_model_scores(std::string_view line, std::vector<std::pair<std::string, double>>& out) {
+    const std::string key = "\"model_scores\":{";
+    size_t p = line.find(key);
+    if (p == std::string_view::npos) return;
+    p += key.size();
+    while (p < line.size() && line[p] != '}') {
+        size_t q1 = line.find('"', p);
+        if (q1 == std::string_view::npos) break;
+        size_t q2 = line.find('"', q1 + 1);
+        if (q2 == std::string_view::npos) break;
+        std::string name(line.substr(q1 + 1, q2 - q1 - 1));
+        size_t colon = line.find(':', q2);
+        if (colon == std::string_view::npos) break;
+        size_t v = colon + 1;
+        size_t end = v;
+        while (end < line.size() && line[end] != ',' && line[end] != '}') ++end;
+        double value = 0.0;
+        try {
+            value = std::stod(std::string(line.substr(v, end - v)));
+        } catch (...) {
+            value = 0.0;
+        }
+        out.emplace_back(std::move(name), value);
+        p = end;
+        if (p < line.size() && line[p] == ',') ++p;
+    }
 }
 
 }  // namespace
@@ -57,14 +103,19 @@ void DecisionLogTailer::index_reset() {
     idx_risk_.clear();
     idx_rule_.clear();
     idx_version_.clear();
+    idx_instance_.clear();
     decision_labels_.clear();
     risk_labels_.clear();
     rule_labels_.clear();
     version_labels_.clear();
+    instance_labels_.clear();
     decision_ids_.clear();
     risk_ids_.clear();
     rule_ids_.clear();
     version_ids_.clear();
+    instance_ids_.clear();
+    for (auto& col : idx_model_scores_) col.clear();
+    instance_agg_.clear();
 }
 
 void DecisionLogTailer::index_push(const DecisionRow& row) {
@@ -73,6 +124,15 @@ void DecisionLogTailer::index_push(const DecisionRow& row) {
     const int32_t risk_id = row.risk_band.empty() ? -1 : intern_label(risk_labels_, risk_ids_, row.risk_band);
     const int32_t rule_id = row.winning_rule_id.empty() ? -1 : intern_label(rule_labels_, rule_ids_, row.winning_rule_id);
     const int32_t version_id = row.ruleset_version.empty() ? -1 : intern_label(version_labels_, version_ids_, row.ruleset_version);
+    const int32_t instance_id = row.instance.empty() ? -1 : intern_label(instance_labels_, instance_ids_, row.instance);
+    const float missing = std::numeric_limits<float>::quiet_NaN();
+    for (const auto& ms : row.model_scores) {
+        if (model_column_ids_.find(ms.first) == model_column_ids_.end()) {
+            model_column_ids_.emplace(ms.first, model_columns_.size());
+            model_columns_.push_back(ms.first);
+            idx_model_scores_.emplace_back(idx_score_.size(), missing);
+        }
+    }
     if (index_count_ < index_capacity_) {
         idx_ts_ms_.push_back(row.ts_ms);
         idx_score_.push_back(static_cast<float>(row.score));
@@ -82,6 +142,11 @@ void DecisionLogTailer::index_push(const DecisionRow& row) {
         idx_risk_.push_back(risk_id);
         idx_rule_.push_back(rule_id);
         idx_version_.push_back(version_id);
+        idx_instance_.push_back(instance_id);
+        for (auto& col : idx_model_scores_) col.push_back(missing);
+        for (const auto& ms : row.model_scores) {
+            idx_model_scores_[model_column_ids_[ms.first]].back() = static_cast<float>(ms.second);
+        }
         ++index_count_;
     } else {
         const size_t slot = index_head_;
@@ -93,13 +158,18 @@ void DecisionLogTailer::index_push(const DecisionRow& row) {
         idx_risk_[slot] = risk_id;
         idx_rule_[slot] = rule_id;
         idx_version_[slot] = version_id;
+        idx_instance_[slot] = instance_id;
+        for (auto& col : idx_model_scores_) col[slot] = missing;
+        for (const auto& ms : row.model_scores) {
+            idx_model_scores_[model_column_ids_[ms.first]][slot] = static_cast<float>(ms.second);
+        }
         index_head_ = (index_head_ + 1) % index_capacity_;
     }
     ++index_total_;
 }
 
 DecisionQueryResult DecisionLogTailer::query(const DecisionQuery& q) const {
-    std::lock_guard<std::mutex> lock(index_mu_);
+    std::shared_lock<std::shared_mutex> lock(index_mu_);
     DecisionQueryResult result;
     result.indexed_rows = static_cast<int64_t>(index_count_);
     result.truncated = index_total_ > static_cast<int64_t>(index_count_);
@@ -115,7 +185,12 @@ DecisionQueryResult DecisionLogTailer::query(const DecisionQuery& q) const {
         auto it = risk_ids_.find(q.risk_band);
         want_risk = it == risk_ids_.end() ? -1 : it->second;
     }
-    if (want_decision == -1 || want_risk == -1) return result;
+    int32_t want_instance = -2;
+    if (!q.instance.empty()) {
+        auto it = instance_ids_.find(q.instance);
+        want_instance = it == instance_ids_.end() ? -1 : it->second;
+    }
+    if (want_decision == -1 || want_risk == -1 || want_instance == -1) return result;
 
     const bool rule_filter = !q.rule.empty();
     std::vector<uint8_t> rule_match(rule_labels_.size(), rule_filter ? 0 : 1);
@@ -130,6 +205,7 @@ DecisionQueryResult DecisionLogTailer::query(const DecisionQuery& q) const {
         const size_t slot = (index_head_ + k) % index_capacity_;
         if (want_decision != -2 && idx_decision_[slot] != want_decision) continue;
         if (want_risk != -2 && idx_risk_[slot] != want_risk) continue;
+        if (want_instance != -2 && idx_instance_[slot] != want_instance) continue;
         if (rule_filter) {
             const int32_t rid = idx_rule_[slot];
             if (rid < 0 || rid >= static_cast<int32_t>(rule_match.size()) || !rule_match[static_cast<size_t>(rid)]) continue;
@@ -140,8 +216,10 @@ DecisionQueryResult DecisionLogTailer::query(const DecisionQuery& q) const {
 
         const int32_t dec_id = idx_decision_[slot];
         const int32_t risk_id = idx_risk_[slot];
+        const int32_t inst_id = idx_instance_[slot];
         if (dec_id >= 0) result.decision_facets[decision_labels_[static_cast<size_t>(dec_id)]] += 1;
         if (risk_id >= 0) result.risk_band_facets[risk_labels_[static_cast<size_t>(risk_id)]] += 1;
+        if (inst_id >= 0) result.instance_facets[instance_labels_[static_cast<size_t>(inst_id)]] += 1;
 
         if (rank >= static_cast<int64_t>(q.offset) && result.rows.size() < limit) {
             DecisionRow row;
@@ -155,6 +233,11 @@ DecisionQueryResult DecisionLogTailer::query(const DecisionQuery& q) const {
             row.winning_rule_id = rule_id >= 0 ? rule_labels_[static_cast<size_t>(rule_id)] : "";
             const int32_t version_id = idx_version_[slot];
             row.ruleset_version = version_id >= 0 ? version_labels_[static_cast<size_t>(version_id)] : "";
+            row.instance = inst_id >= 0 ? instance_labels_[static_cast<size_t>(inst_id)] : "";
+            for (size_t c = 0; c < model_columns_.size(); ++c) {
+                const float v = idx_model_scores_[c][slot];
+                if (v == v) row.model_scores.emplace_back(model_columns_[c], static_cast<double>(v));
+            }
             result.rows.push_back(std::move(row));
         }
         ++rank;
@@ -163,57 +246,186 @@ DecisionQueryResult DecisionLogTailer::query(const DecisionQuery& q) const {
     return result;
 }
 
+DecisionState DecisionLogTailer::scoped_state(const std::string& instance) const {
+    std::shared_lock<std::shared_mutex> lock(index_mu_);
+    DecisionState s;
+    if (instance.empty()) return s;
+    auto it = instance_agg_.find(instance);
+    if (it == instance_agg_.end()) return s;
+    const InstanceAgg& a = it->second;
+    s.rows_seen = a.rows;
+    s.matched_seen = a.matched;
+    s.decision_counts = a.decision_counts;
+    s.risk_band_counts = a.risk_counts;
+    s.winning_rule_counts = a.rule_counts;
+    s.instance_counts[instance] = a.rows;
+    if (a.rows > 0) s.avg_score = a.score_sum / static_cast<double>(a.rows);
+    return s;
+}
+
+std::vector<ModelHistogram> DecisionLogTailer::model_histograms(int bins, const std::string& instance) const {
+    std::shared_lock<std::shared_mutex> lock(index_mu_);
+    std::vector<ModelHistogram> out;
+    if (bins < 1) bins = 1;
+    int32_t want_instance = -2;
+    if (!instance.empty()) {
+        auto it = instance_ids_.find(instance);
+        if (it == instance_ids_.end()) {
+            for (const auto& name : model_columns_) {
+                ModelHistogram h;
+                h.name = name;
+                out.push_back(std::move(h));
+            }
+            return out;
+        }
+        want_instance = it->second;
+    }
+    for (size_t c = 0; c < model_columns_.size(); ++c) {
+        ModelHistogram h;
+        h.name = model_columns_[c];
+        const std::vector<float>& col = idx_model_scores_[c];
+        double mn = std::numeric_limits<double>::infinity();
+        double mx = -std::numeric_limits<double>::infinity();
+        double sum = 0.0;
+        int64_t cnt = 0;
+        for (size_t k = 0; k < index_count_; ++k) {
+            const size_t slot = (index_head_ + k) % index_capacity_;
+            if (want_instance != -2 && idx_instance_[slot] != want_instance) continue;
+            const float v = col[slot];
+            if (v != v) continue;
+            if (v < mn) mn = v;
+            if (v > mx) mx = v;
+            sum += v;
+            ++cnt;
+        }
+        h.count = cnt;
+        if (cnt > 0) {
+            h.min = mn;
+            h.max = mx;
+            h.mean = sum / static_cast<double>(cnt);
+            const double span = (mx > mn) ? (mx - mn) : 1.0;
+            h.bins.resize(static_cast<size_t>(bins));
+            for (int b = 0; b < bins; ++b) {
+                h.bins[static_cast<size_t>(b)].lo = mn + span * b / bins;
+                h.bins[static_cast<size_t>(b)].hi = mn + span * (b + 1) / bins;
+            }
+            for (size_t k = 0; k < index_count_; ++k) {
+                const size_t slot = (index_head_ + k) % index_capacity_;
+                if (want_instance != -2 && idx_instance_[slot] != want_instance) continue;
+                const float v = col[slot];
+                if (v != v) continue;
+                int b = static_cast<int>((v - mn) / span * bins);
+                if (b < 0) b = 0;
+                if (b >= bins) b = bins - 1;
+                ++h.bins[static_cast<size_t>(b)].count;
+            }
+        }
+        if (h.count == 0 && want_instance != -2) continue;
+        out.push_back(std::move(h));
+    }
+    return out;
+}
+
+void DecisionLogTailer::discover_sources() {
+    std::error_code ec;
+    if (is_dir_) {
+        if (!fs::is_directory(root_, ec)) return;
+        for (const auto& entry : fs::directory_iterator(root_, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string ext = entry.path().extension().string();
+            if (ext != ".arrow" && ext != ".ndjson") continue;
+            if (looks_like_dead_letter(entry.path().filename().string())) continue;
+            const std::string p = entry.path().string();
+            bool known = false;
+            for (const auto& s : sources_) {
+                if (s.path == p) { known = true; break; }
+            }
+            if (!known) {
+                LogSource src;
+                src.path = p;
+                src.instance_label = entry.path().stem().string();
+                src.dict_memo = std::make_shared<arrow::ipc::DictionaryMemo>();
+                sources_.push_back(std::move(src));
+            }
+        }
+    } else if (sources_.empty() && !root_.empty()) {
+        LogSource src;
+        src.path = root_;
+        src.instance_label = fs::path(root_).stem().string();
+        src.dict_memo = std::make_shared<arrow::ipc::DictionaryMemo>();
+        sources_.push_back(std::move(src));
+    }
+}
+
 DecisionState DecisionLogTailer::update(SourceStatus& status) {
     status.name = "decision_log";
-    status.location = path_;
-    status.configured = !path_.empty();
-    if (path_.empty()) {
+    status.location = root_;
+    status.configured = !root_.empty();
+    if (root_.empty()) {
         status.active = false;
         cached_ = DecisionState{};
         recent_.clear();
-        read_offset_ = 0;
         score_sum_ = 0.0;
         return cached_;
     }
-    std::error_code ec;
-    uintmax_t bytes = fs::file_size(path_, ec);
-    if (ec) {
-        status.bytes = 0;
-        status.active = false;
-        status.last_error = "file not found or not readable";
-        return cached_;
-    }
-    status.bytes = bytes;
-    status.active = true;
-    status.last_error.clear();
 
-    if (status.bytes < read_offset_) {
+    discover_sources();
+
+    uintmax_t total_bytes = 0;
+    bool any_active = false;
+    bool shrink = false;
+    std::string last_error;
+    std::map<std::string, int64_t> log_bytes;
+    for (const auto& src : sources_) {
+        std::error_code ec;
+        uintmax_t bytes = fs::file_size(src.path, ec);
+        if (ec) { last_error = "not readable: " + src.path; continue; }
+        total_bytes += bytes;
+        log_bytes[src.instance_label] += static_cast<int64_t>(bytes);
+        any_active = true;
+        if (bytes < src.read_offset) shrink = true;
+    }
+    status.bytes = total_bytes;
+    status.active = any_active;
+    status.last_error = last_error;
+
+    std::unique_lock<std::shared_mutex> index_lock(index_mu_);
+    if (shrink) {
         cached_ = DecisionState{};
         recent_.clear();
-        read_offset_ = 0;
         score_sum_ = 0.0;
-        arrow_schema_.reset();
-        dict_memo_ = std::make_unique<arrow::ipc::DictionaryMemo>();
-        std::lock_guard<std::mutex> reset_lock(index_mu_);
+        for (auto& src : sources_) {
+            src.read_offset = 0;
+            src.format_detected = false;
+            src.arrow_mode = false;
+            src.arrow_schema.reset();
+            src.dict_memo = std::make_shared<arrow::ipc::DictionaryMemo>();
+        }
         index_reset();
     }
 
-    if (!format_detected_) {
-        std::ifstream probe(path_, std::ios::binary);
-        unsigned char magic[4] = {0, 0, 0, 0};
-        probe.read(reinterpret_cast<char*>(magic), 4);
-        arrow_mode_ = magic[0] == 0xFF && magic[1] == 0xFF && magic[2] == 0xFF && magic[3] == 0xFF;
-        format_detected_ = true;
+    for (auto& src : sources_) {
+        std::error_code ec;
+        uintmax_t bytes = fs::file_size(src.path, ec);
+        if (ec) continue;
+        if (!src.format_detected && bytes >= 4) {
+            std::ifstream probe(src.path, std::ios::binary);
+            unsigned char magic[4] = {0, 0, 0, 0};
+            probe.read(reinterpret_cast<char*>(magic), 4);
+            if (probe.gcount() == 4) {
+                src.arrow_mode = magic[0] == 0xFF && magic[1] == 0xFF && magic[2] == 0xFF && magic[3] == 0xFF;
+                src.format_detected = true;
+            }
+        }
+        if (!src.format_detected) continue;
+        if (src.arrow_mode) read_arrow(src, status);
+        else read_ndjson(src, bytes);
     }
 
-    std::lock_guard<std::mutex> index_lock(index_mu_);
-    if (arrow_mode_) {
-        read_arrow(status);
-    } else {
-        read_ndjson(status.bytes);
-    }
     cached_.recent.assign(recent_.begin(), recent_.end());
     if (cached_.rows_seen > 0) cached_.avg_score = score_sum_ / static_cast<double>(cached_.rows_seen);
+    cached_.instance_log_bytes = std::move(log_bytes);
     status.last_success_ms = now_ms();
     return cached_;
 }
@@ -226,40 +438,61 @@ void DecisionLogTailer::ingest_row(DecisionRow&& row) {
     if (!row.risk_band.empty()) cached_.risk_band_counts[row.risk_band] += 1;
     if (!row.winning_rule_id.empty()) cached_.winning_rule_counts[row.winning_rule_id] += 1;
     if (!row.ruleset_version.empty()) cached_.ruleset_versions.insert(row.ruleset_version);
+    if (!row.instance.empty()) {
+        cached_.instance_counts[row.instance] += 1;
+        InstanceAgg& a = instance_agg_[row.instance];
+        a.rows += 1;
+        if (is_actioned_decision(row)) a.matched += 1;
+        a.score_sum += row.score;
+        if (!row.decision.empty()) a.decision_counts[row.decision] += 1;
+        if (!row.risk_band.empty()) a.risk_counts[row.risk_band] += 1;
+        if (!row.winning_rule_id.empty()) a.rule_counts[row.winning_rule_id] += 1;
+    }
     index_push(row);
     recent_.push_back(std::move(row));
     while (recent_.size() > tail_lines_) recent_.pop_front();
 }
 
-void DecisionLogTailer::read_ndjson(uintmax_t bytes) {
-    std::ifstream in(path_);
+void DecisionLogTailer::read_ndjson(LogSource& src, uintmax_t bytes) {
+    (void)bytes;
+    std::ifstream in(src.path, std::ios::binary);
     if (!in) return;
-    in.seekg(static_cast<std::streamoff>(read_offset_));
+    in.seekg(static_cast<std::streamoff>(src.read_offset));
     std::string line;
+    uintmax_t consumed = src.read_offset;
     while (std::getline(in, line)) {
-        if (trim(line).empty()) continue;
+        // A final line with no trailing '\n' (a partial record still being appended)
+        // leaves eofbit set: skip it and re-read it complete on the next poll. Only
+        // advance the offset past fully '\n'-terminated lines to avoid double-counting.
+        if (in.eof()) break;
+        consumed += static_cast<uintmax_t>(line.size()) + 1;
+        std::string_view sv(line);
+        if (!sv.empty() && sv.back() == '\r') sv.remove_suffix(1);
+        if (trim(sv).empty()) continue;
         DecisionRow row;
-        row.ts_ms = static_cast<int64_t>(json_number(line, "ts_ms").value_or(0));
-        row.ruleset_version = json_string(line, "ruleset_version").value_or("");
-        row.batch_row = static_cast<int64_t>(json_number(line, "batch_row").value_or(0));
-        row.matched = json_bool(line, "matched").value_or(false);
-        row.decision = json_string(line, "decision").value_or("");
-        row.score = json_number(line, "score").value_or(0.0);
-        row.risk_band = json_string(line, "risk_band").value_or("");
-        row.winning_rule_id = json_string(line, "winning_rule_id").value_or("");
+        row.ts_ms = static_cast<int64_t>(json_number(sv, "ts_ms").value_or(0));
+        row.ruleset_version = json_string(sv, "ruleset_version").value_or("");
+        row.instance = json_string(sv, "instance").value_or(src.instance_label);
+        row.batch_row = static_cast<int64_t>(json_number(sv, "batch_row").value_or(0));
+        row.matched = json_bool(sv, "matched").value_or(false);
+        row.decision = json_string(sv, "decision").value_or("");
+        row.score = json_number(sv, "score").value_or(0.0);
+        row.risk_band = json_string(sv, "risk_band").value_or("");
+        row.winning_rule_id = json_string(sv, "winning_rule_id").value_or("");
+        parse_ndjson_model_scores(sv, row.model_scores);
         ingest_row(std::move(row));
     }
-    read_offset_ = bytes;
+    src.read_offset = consumed;
 }
 
-void DecisionLogTailer::read_arrow(SourceStatus& status) {
-    auto file_result = arrow::io::ReadableFile::Open(path_);
+void DecisionLogTailer::read_arrow(LogSource& src, SourceStatus& status) {
+    auto file_result = arrow::io::ReadableFile::Open(src.path);
     if (!file_result.ok()) {
         status.last_error = "failed to open arrow decision log";
         return;
     }
     std::shared_ptr<arrow::io::RandomAccessFile> file = *file_result;
-    if (!file->Seek(static_cast<int64_t>(read_offset_)).ok()) return;
+    if (!file->Seek(static_cast<int64_t>(src.read_offset)).ok()) return;
     const arrow::ipc::IpcReadOptions read_options = arrow::ipc::IpcReadOptions::Defaults();
     while (true) {
         auto message_result = arrow::ipc::ReadMessage(file.get());
@@ -267,98 +500,132 @@ void DecisionLogTailer::read_arrow(SourceStatus& status) {
         std::unique_ptr<arrow::ipc::Message> message = std::move(*message_result);
         if (!message) break;
         if (message->type() == arrow::ipc::MessageType::SCHEMA) {
-            auto schema_result = arrow::ipc::ReadSchema(*message, dict_memo_.get());
-            if (schema_result.ok()) arrow_schema_ = *schema_result;
-        } else if (message->type() == arrow::ipc::MessageType::RECORD_BATCH && arrow_schema_) {
-            auto batch_result = arrow::ipc::ReadRecordBatch(*message, arrow_schema_,
-                                                            dict_memo_.get(), read_options);
-            if (batch_result.ok()) index_arrow_batch(**batch_result);
+            auto schema_result = arrow::ipc::ReadSchema(*message, src.dict_memo.get());
+            if (schema_result.ok()) src.arrow_schema = *schema_result;
+        } else if (message->type() == arrow::ipc::MessageType::RECORD_BATCH && src.arrow_schema) {
+            auto batch_result = arrow::ipc::ReadRecordBatch(*message, src.arrow_schema,
+                                                            src.dict_memo.get(), read_options);
+            if (batch_result.ok()) index_arrow_batch(**batch_result, src.instance_label);
         }
         auto position = file->Tell();
         if (!position.ok()) break;
-        read_offset_ = static_cast<uintmax_t>(*position);
+        src.read_offset = static_cast<uintmax_t>(*position);
     }
 }
 
-void DecisionLogTailer::index_arrow_batch(const arrow::RecordBatch& batch) {
+void DecisionLogTailer::index_arrow_batch(const arrow::RecordBatch& batch, const std::string& fallback_instance) {
     auto ts = std::dynamic_pointer_cast<arrow::Int64Array>(batch.GetColumnByName("ts_ms"));
     auto batch_row = std::dynamic_pointer_cast<arrow::Int32Array>(batch.GetColumnByName("batch_row"));
     auto version = std::dynamic_pointer_cast<arrow::StringArray>(batch.GetColumnByName("ruleset_version"));
+    auto instance = std::dynamic_pointer_cast<arrow::StringArray>(batch.GetColumnByName("instance"));
     auto matched = std::dynamic_pointer_cast<arrow::BooleanArray>(batch.GetColumnByName("matched"));
     auto decision = std::dynamic_pointer_cast<arrow::StringArray>(batch.GetColumnByName("decision"));
     auto score = std::dynamic_pointer_cast<arrow::DoubleArray>(batch.GetColumnByName("score"));
     auto risk = std::dynamic_pointer_cast<arrow::StringArray>(batch.GetColumnByName("risk_band"));
     auto rule = std::dynamic_pointer_cast<arrow::StringArray>(batch.GetColumnByName("winning_rule_id"));
+    std::vector<std::pair<std::string, std::shared_ptr<arrow::DoubleArray>>> model_cols;
+    for (const auto& field : batch.schema()->fields()) {
+        if (field->name().rfind("model.", 0) != 0) continue;
+        auto arr = std::dynamic_pointer_cast<arrow::DoubleArray>(batch.GetColumnByName(field->name()));
+        if (arr) model_cols.emplace_back(field->name(), arr);
+    }
     const int64_t n = batch.num_rows();
     for (int64_t i = 0; i < n; ++i) {
         DecisionRow row;
         if (ts && ts->IsValid(i)) row.ts_ms = ts->Value(i);
         if (batch_row && batch_row->IsValid(i)) row.batch_row = batch_row->Value(i);
         if (version && version->IsValid(i)) row.ruleset_version = version->GetString(i);
+        row.instance = (instance && instance->IsValid(i)) ? instance->GetString(i) : fallback_instance;
         if (matched && matched->IsValid(i)) row.matched = matched->Value(i);
         if (decision && decision->IsValid(i)) row.decision = decision->GetString(i);
         if (score && score->IsValid(i)) row.score = score->Value(i);
         if (risk && risk->IsValid(i)) row.risk_band = risk->GetString(i);
         if (rule && rule->IsValid(i)) row.winning_rule_id = rule->GetString(i);
+        for (const auto& mc : model_cols) {
+            if (mc.second->IsValid(i)) row.model_scores.emplace_back(mc.first, mc.second->Value(i));
+        }
         ingest_row(std::move(row));
     }
 }
 
-DeadLetterTailer::DeadLetterTailer(std::string path, size_t tail_lines)
-    : path_(std::move(path)), tail_lines_(tail_lines) {}
+DeadLetterTailer::DeadLetterTailer(std::string root, bool is_dir, size_t tail_lines)
+    : root_(std::move(root)), is_dir_(is_dir), tail_lines_(tail_lines) {}
 
-ErrorState DeadLetterTailer::update(SourceStatus& status) {
-    status.name = "dead_letter_log";
-    status.location = path_;
-    status.configured = !path_.empty();
-    if (path_.empty()) {
-        status.active = false;
-        cached_ = ErrorState{};
-        recent_.clear();
-        read_offset_ = 0;
-        return cached_;
-    }
-    std::error_code ec;
-    uintmax_t bytes = fs::file_size(path_, ec);
-    if (ec) {
-        status.bytes = 0;
-        status.active = false;
-        status.last_error = "file not found or not readable";
-        return cached_;
-    }
-    status.bytes = bytes;
-    status.active = true;
-    status.last_error.clear();
-
-    if (status.bytes < read_offset_) {
-        cached_ = ErrorState{};
-        recent_.clear();
-        read_offset_ = 0;
-    }
-
-    std::ifstream in(path_);
-    if (!in) {
-        status.active = false;
-        status.last_error = "failed to open dead-letter log";
-        return cached_;
-    }
-    in.seekg(static_cast<std::streamoff>(read_offset_));
+void DeadLetterTailer::read_file(const std::string& path, uintmax_t& offset) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return;
+    in.seekg(static_cast<std::streamoff>(offset));
     std::string line;
+    uintmax_t consumed = offset;
     while (std::getline(in, line)) {
-        if (trim(line).empty()) continue;
+        if (in.eof()) break;
+        consumed += static_cast<uintmax_t>(line.size()) + 1;
+        std::string_view sv(line);
+        if (!sv.empty() && sv.back() == '\r') sv.remove_suffix(1);
+        if (trim(sv).empty()) continue;
         ErrorRow row;
-        row.ts_ms = static_cast<int64_t>(json_number(line, "ts_ms").value_or(0));
-        row.code = json_string(line, "code").value_or("");
-        row.message = json_string(line, "message").value_or("");
-        row.source = json_string(line, "source").value_or("");
-        row.row_index = static_cast<int64_t>(json_number(line, "row_index").value_or(-1));
-        row.column_name = json_string(line, "column_name").value_or("");
+        row.ts_ms = static_cast<int64_t>(json_number(sv, "ts_ms").value_or(0));
+        row.code = json_string(sv, "code").value_or("");
+        row.message = json_string(sv, "message").value_or("");
+        row.source = json_string(sv, "source").value_or("");
+        row.row_index = static_cast<int64_t>(json_number(sv, "row_index").value_or(-1));
+        row.column_name = json_string(sv, "column_name").value_or("");
         cached_.rows_seen += 1;
         if (!row.code.empty()) cached_.code_counts[row.code] += 1;
         recent_.push_back(std::move(row));
         while (recent_.size() > tail_lines_) recent_.pop_front();
     }
-    read_offset_ = status.bytes;
+    offset = consumed;
+}
+
+ErrorState DeadLetterTailer::update(SourceStatus& status) {
+    status.name = "dead_letter_log";
+    status.location = root_;
+    status.configured = !root_.empty();
+    if (root_.empty()) {
+        status.active = false;
+        cached_ = ErrorState{};
+        recent_.clear();
+        offsets_.clear();
+        return cached_;
+    }
+    std::error_code ec;
+    std::vector<std::string> files;
+    if (is_dir_) {
+        if (fs::is_directory(root_, ec)) {
+            for (const auto& entry : fs::directory_iterator(root_, ec)) {
+                if (ec) break;
+                if (!entry.is_regular_file(ec)) continue;
+                if (entry.path().extension().string() != ".ndjson") continue;
+                if (!looks_like_dead_letter(entry.path().filename().string())) continue;
+                files.push_back(entry.path().string());
+            }
+        }
+    } else {
+        files.push_back(root_);
+    }
+
+    uintmax_t total_bytes = 0;
+    bool any_active = false;
+    bool shrink = false;
+    for (const auto& f : files) {
+        uintmax_t b = fs::file_size(f, ec);
+        if (ec) continue;
+        total_bytes += b;
+        any_active = true;
+        if (b < offsets_[f]) shrink = true;
+    }
+    status.bytes = total_bytes;
+    status.active = any_active;
+    status.last_error.clear();
+
+    if (shrink) {
+        cached_ = ErrorState{};
+        recent_.clear();
+        for (auto& kv : offsets_) kv.second = 0;
+    }
+    for (const auto& f : files) read_file(f, offsets_[f]);
+
     cached_.recent.assign(recent_.begin(), recent_.end());
     status.last_success_ms = now_ms();
     return cached_;
@@ -692,23 +959,87 @@ BenchmarkState BenchmarkReader::update(SourceStatus& status) {
     return cached_;
 }
 
-RulesetReader::RulesetReader(std::string active_path, std::string candidate_path, std::string history_dir)
+RulesetReader::RulesetReader(std::string active_path, std::string rules_dir,
+                             std::string candidate_path, std::string history_dir)
     : active_path_(std::move(active_path)),
+      rules_dir_(std::move(rules_dir)),
       candidate_path_(std::move(candidate_path)),
       history_dir_(std::move(history_dir)) {}
 
+std::string RulesetReader::resolve_selector_path(const std::string& selector) const {
+    if (rules_dir_.empty()) {
+        if (active_path_.empty()) return "";
+        return blazerules::is_s3_uri(active_path_)
+            ? blazerules::resolve_resource_to_local(active_path_) : active_path_;
+    }
+    std::error_code ec;
+    std::vector<std::string> yamls;
+    if (fs::is_directory(rules_dir_, ec)) {
+        for (const auto& entry : fs::directory_iterator(rules_dir_, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string ext = entry.path().extension().string();
+            if (ext == ".yaml" || ext == ".yml") yamls.push_back(entry.path().string());
+        }
+    }
+    if (yamls.empty()) return "";
+    std::sort(yamls.begin(), yamls.end());
+    if (selector.empty()) return yamls.front();
+    std::string sel;
+    for (char c : selector) sel += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (int pass = 0; pass < 2; ++pass) {
+        for (const auto& y : yamls) {
+            std::string stem = fs::path(y).stem().string();
+            std::string low;
+            for (char c : stem) low += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            if ((pass == 0 && low == sel) || (pass == 1 && low.find(sel) != std::string::npos)) return y;
+        }
+    }
+    return yamls.front();
+}
+
+std::vector<std::string> RulesetReader::ruleset_names() const {
+    std::vector<std::string> names;
+    if (rules_dir_.empty()) return names;
+    std::error_code ec;
+    if (fs::is_directory(rules_dir_, ec)) {
+        for (const auto& entry : fs::directory_iterator(rules_dir_, ec)) {
+            if (ec) break;
+            if (!entry.is_regular_file(ec)) continue;
+            const std::string ext = entry.path().extension().string();
+            if (ext == ".yaml" || ext == ".yml") names.push_back(entry.path().stem().string());
+        }
+    }
+    std::sort(names.begin(), names.end());
+    return names;
+}
+
+RulesetState RulesetReader::ruleset_for(const std::string& selector) const {
+    RulesetState next;
+    const std::string path = resolve_selector_path(selector);
+    next.active_path = path;
+    next.active_configured = !path.empty();
+    if (!path.empty()) {
+        load_rules_file(path, next.active_yaml, next.active_valid, next.active_error,
+                        next.active_rule_count, next.active_bytes, next.active_modified_ms,
+                        &next.operator_counts, &next.action_counts, &next.field_counts);
+    }
+    return next;
+}
+
 RulesetState RulesetReader::update(SourceStatus& status) {
     status.name = "ruleset";
-    status.location = active_path_;
-    status.configured = !active_path_.empty();
+    const std::string active = resolve_selector_path("");
+    status.location = active;
+    status.configured = !active.empty();
     RulesetState next;
-    next.active_path = active_path_;
+    next.active_path = active;
     next.candidate_path = candidate_path_;
     next.history_dir = history_dir_;
-    next.active_configured = !active_path_.empty();
+    next.active_configured = !active.empty();
     next.candidate_configured = !candidate_path_.empty();
-    if (!active_path_.empty()) {
-        load_rules_file(active_path_, next.active_yaml, next.active_valid, next.active_error,
+    if (!active.empty()) {
+        load_rules_file(active, next.active_yaml, next.active_valid, next.active_error,
                         next.active_rule_count, next.active_bytes, next.active_modified_ms,
                         &next.operator_counts, &next.action_counts, &next.field_counts);
         status.active = next.active_valid;

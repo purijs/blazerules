@@ -4,7 +4,8 @@ const f2 = n => Number(n || 0).toLocaleString(undefined, {maximumFractionDigits:
 const dt = ms => ms ? new Date(ms).toLocaleString() : "";
 const tm = ms => ms ? new Date(ms).toLocaleTimeString() : "";
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const app = {decisionOffset: 0, decisionLimit: 800, filtered: false, yamlRaw: "", yamlLines: [], folded: new Set()};
+const app = {decisionOffset: 0, decisionLimit: 800, filtered: false, yamlRaw: "", yamlLines: [], folded: new Set(), tab: "overview", instanceCounts: {}, scope: ""};
+const scopeQ = (sep) => app.scope ? `${sep}instance=${encodeURIComponent(app.scope)}` : "";
 
 function fmtBytes(n) {
   n = Math.max(0, Number(n || 0));
@@ -33,6 +34,8 @@ function setTabs() {
     document.querySelectorAll(".navbtn,.view").forEach(x => x.classList.remove("active"));
     b.classList.add("active");
     $(b.dataset.tab).classList.add("active");
+    app.tab = b.dataset.tab;
+    if (app.tab === "models") renderModels();
     applyFilter();
   });
   $("filter").oninput = applyFilter;
@@ -72,12 +75,27 @@ function planBars(obj, limit = 24) {
 
 function updateSelect(id, counts) {
   const el = $(id);
-  const value = el.value;
-  const options = [`<option value="">Any</option>`].concat(
+  const desired = [`<option value="">Any</option>`].concat(
     Object.keys(counts || {}).sort().map(v => `<option value="${esc(v)}">${esc(v)}</option>`)
-  );
-  el.innerHTML = options.join("");
+  ).join("");
+  if (el.dataset.built === desired) return;
+  const value = el.value;
+  el.innerHTML = desired;
+  el.dataset.built = desired;
   if ([...el.options].some(o => o.value === value)) el.value = value;
+}
+
+function updateScopeSelect(counts) {
+  const el = $("scopeInstance");
+  const desired = [`<option value="">All rulesets</option>`].concat(
+    Object.keys(counts || {}).sort().map(v => `<option value="${esc(v)}">${esc(v)}</option>`)
+  ).join("");
+  if (el.dataset.built !== desired) {
+    el.innerHTML = desired;
+    el.dataset.built = desired;
+  }
+  if ([...el.options].some(o => o.value === app.scope)) el.value = app.scope;
+  else { el.value = ""; app.scope = ""; }
 }
 
 function localMs(id) {
@@ -97,6 +115,7 @@ function decisionQuery(scan) {
   const to = localMs("toFilter");
   if (decision) p.set("decision", decision);
   if (risk) p.set("risk_band", risk);
+  if (app.scope) p.set("instance", app.scope);
   if (rule) p.set("rule", rule);
   if (from) p.set("from_ms", String(from));
   if (to) p.set("to_ms", String(to));
@@ -105,8 +124,8 @@ function decisionQuery(scan) {
 
 function renderDecisions(d) {
   const rowsOut = (d.rows || []).slice().reverse().map(x =>
-    `<tr>${cell(dt(x.ts_ms))}${cell(x.matched ? "yes" : "no")}${cell(x.decision, "mono")}${cell(f2(x.score))}${cell(x.risk_band, "mono")}${cell(x.winning_rule_id, "mono")}${cell(x.ruleset_version, "mono")}</tr>`
-  ).join("") || `<tr><td colspan="7" class="empty">No decision log rows match the current filters</td></tr>`;
+    `<tr>${cell(dt(x.ts_ms))}${cell(x.instance, "mono")}${cell(x.matched ? "yes" : "no")}${cell(x.decision, "mono")}${cell(f2(x.score))}${cell(x.risk_band, "mono")}${cell(x.winning_rule_id, "mono")}${cell(x.ruleset_version, "mono")}</tr>`
+  ).join("") || `<tr><td colspan="8" class="empty">No decision log rows match the current filters</td></tr>`;
   $("decisionRows").innerHTML = rowsOut;
   const start = (d.total_recent || 0) ? (app.decisionOffset + 1) : 0;
   const end = Math.min(app.decisionOffset + (d.rows || []).length, d.total_recent || 0);
@@ -122,11 +141,15 @@ async function loadDecisions(scan) {
 }
 
 function setDecisionControls() {
-  $("applyDecisionFilters").onclick = async () => {
+  const applyNow = async () => {
     app.filtered = true;
     app.decisionOffset = 0;
+    $("decisionRows").innerHTML = `<tr><td colspan="8" class="empty">Filtering…</td></tr>`;
     await loadDecisions(true);
   };
+  ["decisionFilter", "riskFilter"].forEach(id => { $(id).onchange = applyNow; });
+  ["ruleFilter", "fromFilter", "toFilter"].forEach(id => { $(id).onchange = applyNow; });
+  $("applyDecisionFilters").onclick = applyNow;
   $("resetDecisionFilters").onclick = async () => {
     app.filtered = false;
     app.decisionOffset = 0;
@@ -212,16 +235,68 @@ function setYamlControls() {
   };
 }
 
+function modelHistogram(m) {
+  const bins = m.bins || [];
+  const max = Math.max(...bins.map(b => b.count), 1);
+  const bars = bins.map(b =>
+    `<div class="hbar" title="${f2(b.lo)} – ${f2(b.hi)}: ${fmt(b.count)}"><span style="height:${Math.max(1, b.count / max * 100)}%"></span></div>`
+  ).join("");
+  const name = m.name.replace(/^model\./, "");
+  return `<div class="panel span6">
+    <h2>${esc(name)}</h2>
+    <div class="modelstats mono">n=${fmt(m.count)} &middot; min ${f2(m.min)} &middot; mean ${f2(m.mean)} &middot; max ${f2(m.max)}</div>
+    <div class="histogram">${bars || `<div class="empty">No predictions</div>`}</div>
+    <div class="axis-note mono">${f2(m.min)}<span class="axis-right">${f2(m.max)}</span></div>
+  </div>`;
+}
+
+async function renderModels() {
+  const inst = app.scope;
+  const mp = new URLSearchParams(); mp.set("bins", "24"); if (inst) mp.set("instance", inst);
+  const dp = new URLSearchParams(); dp.set("limit", "500"); if (inst) dp.set("instance", inst);
+  let mv, dv;
+  try {
+    [mv, dv] = await Promise.all([j(`/api/models?${mp}`), j(`/api/decisions?${dp}`)]);
+  } catch (err) { console.error(err); return; }
+  const models = mv.models || [];
+  $("modelHint").textContent = models.length ? `${models.length} model channel(s)` : "";
+  if (!models.length) {
+    $("modelCards").innerHTML = `<div class="panel span12"><div class="empty">No models configured. Register one with --model NAME=model.onnx and add a model_score rule that references it.</div></div>`;
+    $("modelTableHead").innerHTML = "";
+    $("modelTableBody").innerHTML = "";
+    return;
+  }
+  $("modelCards").innerHTML = models.map(modelHistogram).join("");
+  const cols = models.map(m => m.name);
+  $("modelTableHead").innerHTML = `<tr><th>Time</th><th>Instance</th><th>Decision</th>${cols.map(c => `<th>${esc(c.replace(/^model\./, ""))}</th>`).join("")}</tr>`;
+  $("modelTableBody").innerHTML = (dv.rows || []).slice().reverse().map(x => {
+    const ms = x.model_scores || {};
+    return `<tr>${cell(dt(x.ts_ms))}${cell(x.instance, "mono")}${cell(x.decision, "mono")}${cols.map(c => cell(c in ms ? f2(ms[c]) : "", "mono")).join("")}</tr>`;
+  }).join("") || `<tr><td colspan="${3 + cols.length}" class="empty">No prediction rows match the current filter</td></tr>`;
+}
+
+function setModelControls() {
+  $("refreshModels").onclick = renderModels;
+}
+
+function setScope() {
+  $("scopeInstance").onchange = () => {
+    app.scope = $("scopeInstance").value;
+    app.decisionOffset = 0;
+    refresh();
+  };
+}
+
 async function refresh() {
   try {
     const [s, h, recent, r, e, m, rs] = await Promise.all([
-      j("/api/summary"),
+      j(`/api/summary${scopeQ("?")}`),
       j("/api/health"),
-      app.filtered ? Promise.resolve(null) : j(`/api/decisions?limit=${app.decisionLimit}`),
-      j("/api/rules?limit=200"),
+      app.filtered ? Promise.resolve(null) : j(`/api/decisions?limit=${app.decisionLimit}${scopeQ("&")}`),
+      j(`/api/rules?limit=200${scopeQ("&")}`),
       j("/api/errors?limit=300"),
       j("/api/metrics"),
-      j("/api/ruleset")
+      j(`/api/ruleset${app.scope ? "?ruleset=" + encodeURIComponent(app.scope) : ""}`)
     ]);
     $("topline").textContent = `version ${s.version || ""} | ruleset ${s.active_ruleset_version || "unknown"} | updated ${tm(s.last_update_ms)}`;
     const active = (h.sources || []).some(x => x.active);
@@ -231,12 +306,13 @@ async function refresh() {
     const o = s.overview || {};
     const t = s.timing_ms || {};
     const cards = [
+      ["Eval rec/s", fmt(o.recent_records_per_sec), "records evaluated"],
+      ["Input/s", `${fmtBytes(o.recent_input_bytes_per_sec)}/s`, "ingested by agent"],
       ["Records", fmt(o.records_evaluated)],
       ["Actioned", fmt(o.records_matched), f2((o.match_rate || 0) * 100) + "%"],
       ["Skipped", fmt(o.records_skipped)],
-      ["Recent r/s", fmt(o.recent_records_per_sec)],
       ["Log size", fmtBytes(o.decision_log_bytes)],
-      ["Data/s", `${fmtBytes(o.recent_bytes_per_sec)}/s`]
+      ["Decision log/s", `${fmtBytes(o.recent_bytes_per_sec)}/s`, "output write rate"]
     ];
     $("cards").innerHTML = cards.map(c => `<div class="panel metric span2"><div class="label">${c[0]}</div><div class="value">${c[1]}</div><div class="hint">${c[2] || ""}</div></div>`).join("");
 
@@ -245,19 +321,25 @@ async function refresh() {
     $("latencyBars").innerHTML = o.has_metrics ? lat.map(x => `<div class="barrow"><span>${x[0]}</span><div class="bar"><span style="width:${Math.min(100, (x[1] || 0) / latMax * 100)}%"></span></div><span class="mono">${f2(x[1])} ms</span></div>`).join("") : `<div class="empty">No metrics endpoint configured for engine latency.</div>`;
     $("spark").innerHTML = `<polyline fill="none" stroke="#2563eb" stroke-width="2" points="${spark(s.history)}"></polyline>`;
     $("timelineBars").innerHTML = timeline(s.history);
-    $("timelineHint").textContent = `${fmt(o.recent_records_per_sec)} r/s, ${fmtBytes(o.recent_bytes_per_sec)}/s`;
+    $("timelineHint").textContent = `${fmt(o.recent_records_per_sec)} rec/s evaluated · ${fmtBytes(o.recent_bytes_per_sec)}/s decision log`;
 
     const decisionTotal = Object.values(s.decision_counts || {}).reduce((a, b) => a + b, 0);
     $("decisionDist").innerHTML = rows(s.decision_counts, decisionTotal);
+    app.instanceCounts = s.instance_counts || {};
+    const instanceTotal = Object.values(app.instanceCounts).reduce((a, b) => a + b, 0);
+    $("instanceRows").innerHTML = rows(app.instanceCounts, instanceTotal);
     updateSelect("decisionFilter", s.decision_counts || {});
     updateSelect("riskFilter", s.risk_band_counts || {});
+    const scopeKeys = Object.assign({}, app.instanceCounts);
+    (rs.names || []).forEach(n => { if (!(n in scopeKeys)) scopeKeys[n] = 0; });
+    updateScopeSelect(scopeKeys);
     if (recent) renderDecisions(recent);
-    $("logFacets").innerHTML = `<div class="facet"><strong>Decision</strong><table><tbody>${rows(s.decision_counts)}</tbody></table></div><div class="facet"><strong>Risk Band</strong><table><tbody>${rows(s.risk_band_counts)}</tbody></table></div>`;
+    $("logFacets").innerHTML = `<div class="facet"><strong>Decision</strong><table><tbody>${rows(s.decision_counts)}</tbody></table></div><div class="facet"><strong>Risk Band</strong><table><tbody>${rows(s.risk_band_counts)}</tbody></table></div><div class="facet"><strong>Instance</strong><table><tbody>${rows(app.instanceCounts)}</tbody></table></div>`;
+    if (app.tab === "models") renderModels();
 
-    $("winningRows").innerHTML = Object.entries((recent?.rows || []).reduce((a, x) => {
-      if (x.winning_rule_id) a[x.winning_rule_id] = (a[x.winning_rule_id] || 0) + 1;
-      return a;
-    }, {})).sort((a, b) => b[1] - a[1]).slice(0, 20).map(([k, v]) => `<tr>${cell(k, "mono")}${cell(fmt(v))}</tr>`).join("") || `<tr><td colspan="2" class="empty">No winning rules observed</td></tr>`;
+    $("winningRows").innerHTML = (r.rows || []).filter(x => x.winning_total > 0)
+      .slice().sort((a, b) => b.winning_total - a.winning_total).slice(0, 20)
+      .map(x => `<tr>${cell(x.rule_id, "mono")}${cell(fmt(x.winning_total))}</tr>`).join("") || `<tr><td colspan="2" class="empty">No winning rules observed</td></tr>`;
 
     $("ruleRows").innerHTML = (r.rows || []).map(x => `<tr>${cell(x.rule_id, "mono")}${cell(fmt(x.fired_total))}${cell(f2((x.fire_rate || 0) * 100) + "%")}${cell(fmt(x.winning_total ?? x.winning_recent))}</tr>`).join("") || `<tr><td colspan="4" class="empty">No rule metrics yet</td></tr>`;
     $("operatorBars").innerHTML = planBars(rs.operator_counts, 24);
@@ -280,7 +362,9 @@ async function refresh() {
 }
 
 setTabs();
+setScope();
 setDecisionControls();
+setModelControls();
 setYamlControls();
 refresh();
 setInterval(refresh, 1000);

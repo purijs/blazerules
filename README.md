@@ -219,13 +219,95 @@ import pyarrow.ipc as ipc
 table = ipc.open_stream("decisions.arrow").read_all()
 ```
 
+Dead-letter output is always NDJSON regardless of the decision-log format, so
+name it `.ndjson` even when `--output arrow`:
+
+```bash
+blazerules_agent --rules rules.yaml --input http \
+  --output arrow --output-path decisions.arrow \
+  --dead-letter-path dead_letter.ndjson
+```
+
+### Multiple Rulesets In One Agent (Instances)
+
+A single agent process can run many independent pipelines at once — each
+instance has its own ruleset, input, models, output, and dedupe settings. Pass a
+config file with `--config`:
+
+```yaml
+# agent.yaml
+instances:
+  - name: checkout
+    rules: checkout_rules.yaml
+    input: {type: http, host: 127.0.0.1, port: 9480}
+    output: {type: arrow, path: logs/checkout.arrow, dead_letter_path: logs/checkout_dlq.ndjson}
+  - name: fraud
+    rules: fraud_rules.yaml
+    models: ["risk=models/fraud.onnx"]
+    input: {type: http, host: 127.0.0.1, port: 9481}
+    output: {type: arrow, path: logs/fraud.arrow}
+```
+
+```bash
+blazerules_agent --config agent.yaml
+```
+
+Every decision row carries the `instance` name and `ruleset_version` it came
+from, so downstream consumers (and the dashboard) can tell which ruleset
+produced each decision. Point the dashboard at the whole `logs/` directory with
+`--decision-log-dir` to view all instances together, and add `--rules-dir` (a
+directory or `s3://` prefix of the rule files) so the header's **Ruleset**
+selector lists every ruleset — populated from the files on disk even before any
+decisions arrive — and scopes any page (Overview, Timeline, Models, and the
+Ruleset Visualizer) to one instance or compares them. Name each rule file to
+match its instance (e.g. `checkout.yaml` for `--name checkout`) so one selection
+drives both the data panels and the visualizer.
+
+### ML Models (ONNX)
+
+`model_score` conditions call an ONNX model registered by name. Register one or
+more models with repeatable `--model name=path` flags (or an instance's
+`models:` list); files may be local paths or `s3://` URIs:
+
+```bash
+blazerules_agent --rules rules.yaml --input http \
+  --model risk_logistic=models/risk_logistic.onnx \
+  --model loss_regression=models/loss_regression.onnx \
+  --output arrow --output-path decisions.arrow
+```
+
+```yaml
+# a rule referencing each model
+- id: high_risk
+  action: review
+  conditions:
+    model_score: {model: risk_logistic, features: [f0, f1, f2], op: gte, value: 0.8}
+- id: high_expected_loss
+  action: flag
+  conditions:
+    model_score: {model: loss_regression, features: [f0, f1, f2], op: gt, value: 120}
+```
+
+Both classification (e.g. logistic → probability in `[0,1]`) and regression
+(continuous output) models work; the model's raw prediction per record is
+written into the decision log — as a `model.<name>` float column in Arrow, or a
+`model_scores` object in NDJSON — and surfaced on the dashboard's Models page.
+Models are scored in parallel across records with NEON/SIMD feature gathering, so
+adding a model does not change the hot path when no rule references it.
+
+In Python the same predictions come back on the result at full parity with the
+agent: `result.model_scores` is a dict of `model.<name>` → per-row score array
+(with `result.model_names` and a zero-copy `result.model_scores_buffer(name)`),
+and `EngineConfig.model_intra_op_threads` tunes ONNX Runtime's intra-op threads
+for faster single-batch inference.
+
 ## Decisions, DLQ, And Dashboard
 
 BlazeRules returns per-record decisions directly in Python/C++. The agent can
 also write an NDJSON (or Arrow) decision log for downstream routing:
 
 ```json
-{"ts_ms":1782150000000,"batch_row":0,"decision":"REVIEW","score":72.0,"risk_band":"HIGH","winning_rule_id":"high_risk_payment"}
+{"ts_ms":1782150000000,"instance":"checkout","batch_row":0,"ruleset_version":"1.0.0","matched":true,"decision":"REVIEW","score":72.0,"risk_band":"HIGH","winning_rule_id":"high_risk_payment","model_scores":{"model.risk_logistic":0.83}}
 ```
 
 Dead-letter records keep malformed or type-bad input out of the hot path while
@@ -233,6 +315,67 @@ preserving enough context to debug the producer: each record carries the error
 `code`, the offending `column_name`, and a `message` naming the field that could
 not be parsed. The dashboard reads decision logs, dead-letter logs, metrics,
 benchmark output, and rule summaries.
+
+The dashboard has pages for the decision stream (Overview, Event Timeline), per-rule
+fire rates, a ruleset visualizer, and a **Models** page. A **Ruleset** selector in
+the header scopes every page to one instance/ruleset or *All* — so with a
+multi-instance agent you can compare rulesets side by side (an A/B view). The Models
+page shows, per registered model, a prediction-distribution histogram (probabilities
+for classification, values for regression) plus a filterable per-record prediction
+table, and scales to any number of models. An **Instances / Rulesets** panel on the
+Overview breaks records down by instance. (Dead-letter files are never treated as an
+instance, so they don't pollute the selector.)
+
+For a multi-instance agent (one decision log per instance), point the dashboard
+at the directory instead of a single file:
+
+```bash
+# single instance
+blazerules_dashboard --decision-log decisions.arrow --rules rules.yaml
+
+# many instances (one *.arrow / *.ndjson per instance under logs/)
+blazerules_dashboard --decision-log-dir logs/ --dead-letter-log logs/dlq.ndjson
+```
+
+## Stateless Deployment: Decision Logs On S3
+
+Both the agent's output and the dashboard's input can live on S3, so a pod keeps
+no durable local state. This reuses the same `aws` CLI that resolves `s3://`
+rules/lookups/models — no linked AWS SDK — and honors a custom endpoint, so it
+works against AWS or any S3-compatible store (MinIO, Ceph, R2). Credentials come
+from the standard AWS environment (or an instance role); region and endpoint from
+the environment or explicit flags.
+
+Point the agent's `--output-path` at an `s3://…/prefix/`. It writes **rolled part
+objects** locally and uploads them to the prefix in the background — each part is
+capped by size/age so re-upload stays bounded, and each Arrow part is a complete,
+independently-readable IPC stream:
+
+```bash
+export AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... AWS_REGION=eu-central-1
+
+blazerules_agent --name checkout --rules rules.yaml --input http \
+  --output arrow --output-path s3://my-bucket/decisions/checkout/ \
+  --dead-letter-path dlq.ndjson \
+  --s3-roll-mb 64 --s3-flush-seconds 10
+```
+
+Point the dashboard at the same prefix (or a parent prefix holding one sub-prefix
+per instance). It syncs new part objects to a local cache and feeds them into the
+same fast index used for local files:
+
+```bash
+blazerules_dashboard --decision-log-dir s3://my-bucket/decisions/ --rules rules.yaml
+# or a single object:
+blazerules_dashboard --decision-log s3://my-bucket/decisions/checkout/part-000001.arrow
+```
+
+Flags on both binaries: `--aws-region REGION` and `--aws-endpoint-url URL`
+(otherwise read from `AWS_REGION`/`AWS_ENDPOINT_URL`). Agent roll controls:
+`--s3-roll-mb` (part size cap, default 64) and `--s3-flush-seconds` (roll + upload
+cadence, default 10). On `SIGINT`/`SIGTERM` the agent flushes its final part before
+exiting, so a rolling deploy loses nothing. Dead-letter output stays a local
+NDJSON file — mirror it separately if you need it centralized.
 
 ![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
 
@@ -709,6 +852,11 @@ cmake --build cmake-build-release --target blazerules_agent -j
 The dashboard is read-only and unauthenticated. Bind to localhost unless you add
 your own network controls.
 
+If the agent returns HTTP 500 on `/v1/logs` (a bad ruleset, a missing lookup
+file, a schema mismatch), it also logs `instance '<name>': evaluation error:
+<message>` to its own stderr (throttled to once a second), so a misconfiguration
+is visible in the agent log rather than silently producing an empty decision log.
+
 ## Performance Guidance
 
 - Use Release builds.
@@ -721,6 +869,9 @@ your own network controls.
 - Use larger batches for throughput benchmarks.
 - Use `OutputDetail.DECISIONS` unless per-rule masks are required.
 - Keep partition/entity affinity for window-heavy streaming workloads.
+- For a stateless ruleset under the agent, `blazerules_agent --eval-shards N`
+  spreads evaluation across N cloned engines; it auto-downgrades to a single
+  engine (with a stderr note) for stateful rulesets that use windows or dedupe.
 - Avoid huge unused JSON fields when chasing JSON throughput; skipped bytes are
   still bytes the parser must scan.
 

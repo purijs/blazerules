@@ -143,6 +143,15 @@ class FailClosedLoadTest(unittest.TestCase):
                 }
             )
 
+    def test_deeply_nested_condition_rejected(self):
+        # A pathologically deep condition tree must be rejected by the depth guard,
+        # not overflow the stack (mirrors the C++ RejectsDeeplyNested* tests).
+        cond = {"field": "amount", "op": "gt", "value": 1}
+        for _ in range(300):
+            cond = {"and": [cond]}
+        with self.assertRaises(blazerules.BlazeRulesError):
+            self._load({"id": "r", "action": "flag", "conditions": cond})
+
     def test_valid_rule_still_loads(self):
         # Sanity: strictness must not reject legitimate rules.
         self._load(

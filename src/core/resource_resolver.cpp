@@ -254,4 +254,37 @@ std::string resolve_resource_to_local(const std::string& uri) {
     return dest.string();
 }
 
+bool s3_upload_file(const std::string& local_path, const std::string& s3_uri) {
+    std::string cmd = aws_cli_command_prefix() + " s3 cp " + shell_quote(local_path) + " " +
+                      shell_quote(s3_uri) + " >/dev/null 2>/dev/null";
+    return std::system(cmd.c_str()) == 0;
+}
+
+bool s3_download_file(const std::string& s3_uri, const std::string& local_path) {
+    std::string cmd = aws_cli_command_prefix() + " s3 cp " + shell_quote(s3_uri) + " " +
+                      shell_quote(local_path) + " >/dev/null 2>/dev/null";
+    return std::system(cmd.c_str()) == 0;
+}
+
+bool s3_sync_up(const std::string& local_dir, const std::string& s3_prefix) {
+    std::string cmd = aws_cli_command_prefix() + " s3 sync " + shell_quote(local_dir) + " " +
+                      shell_quote(s3_prefix) + " >/dev/null 2>/dev/null";
+    return std::system(cmd.c_str()) == 0;
+}
+
+bool s3_sync_down(const std::string& s3_prefix, const std::string& local_dir) {
+    std::string cmd = aws_cli_command_prefix() + " s3 sync " + shell_quote(s3_prefix) + " " +
+                      shell_quote(local_dir) + " >/dev/null 2>/dev/null";
+    return std::system(cmd.c_str()) == 0;
+}
+
+std::string s3_local_cache_dir(const std::string& uri) {
+    std::hash<std::string> hasher;
+    fs::path dir = fs::path(cache_root()) /
+                   ("s3sync-" + std::to_string(static_cast<unsigned long long>(hasher(resource_cache_key(uri)))));
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    return dir.string();
+}
+
 } // namespace blazerules

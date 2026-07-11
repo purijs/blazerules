@@ -81,10 +81,14 @@ std::string to_std_string(absl::string_view value) {
 }
 
 std::shared_ptr<arrow::DataType> arrow_type_from_proto_field(
-    const google::protobuf::FieldDescriptor* field);
+    const google::protobuf::FieldDescriptor* field, int depth = 0);
 
 std::shared_ptr<arrow::DataType> arrow_value_type_from_proto_field(
-    const google::protobuf::FieldDescriptor* field) {
+    const google::protobuf::FieldDescriptor* field, int depth = 0) {
+    if (depth > 32) {
+        throw std::runtime_error(
+            "protobuf message nesting exceeds 32 levels (recursive/self-referential type?)");
+    }
     using FD = google::protobuf::FieldDescriptor;
     switch (field->type()) {
         case FD::TYPE_DOUBLE:
@@ -119,7 +123,7 @@ std::shared_ptr<arrow::DataType> arrow_value_type_from_proto_field(
             for (int i = 0; i < descriptor->field_count(); ++i) {
                 const auto* nested = descriptor->field(i);
                 fields.push_back(arrow::field(to_std_string(nested->name()),
-                                              arrow_type_from_proto_field(nested),
+                                              arrow_type_from_proto_field(nested, depth + 1),
                                               nested->has_presence()));
             }
             return arrow::struct_(std::move(fields));
@@ -130,8 +134,8 @@ std::shared_ptr<arrow::DataType> arrow_value_type_from_proto_field(
 }
 
 std::shared_ptr<arrow::DataType> arrow_type_from_proto_field(
-    const google::protobuf::FieldDescriptor* field) {
-    auto value_type = arrow_value_type_from_proto_field(field);
+    const google::protobuf::FieldDescriptor* field, int depth) {
+    auto value_type = arrow_value_type_from_proto_field(field, depth);
     if (field->is_repeated()) {
         return arrow::list(arrow::field("item", value_type, false));
     }

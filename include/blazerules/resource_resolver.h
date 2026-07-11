@@ -10,6 +10,16 @@ std::string resource_parent(const std::string& uri);
 std::string join_resource_path(const std::string& base, const std::string& path);
 std::string resolve_resource_to_local(const std::string& uri);
 
+// Stateless-deployment S3 helpers. All shell out to the same `aws` CLI that
+// resolve_resource_to_local uses (honoring the profile/region/endpoint set via
+// the setters below), so they support custom endpoint URLs and need no linked
+// AWS SDK. Each returns true on success.
+bool s3_upload_file(const std::string& local_path, const std::string& s3_uri);
+bool s3_download_file(const std::string& s3_uri, const std::string& local_path);
+bool s3_sync_up(const std::string& local_dir, const std::string& s3_prefix);
+bool s3_sync_down(const std::string& s3_prefix, const std::string& local_dir);
+std::string s3_local_cache_dir(const std::string& uri);
+
 void set_aws_profile(const std::string& profile, bool clear_env_credentials = true);
 void clear_aws_profile();
 std::string current_aws_profile();
