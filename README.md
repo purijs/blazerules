@@ -21,6 +21,8 @@ The engine is batch-first internally. Ingestion adapters collect events into
 microbatches, infer or bind a schema, evaluate rules, and emit compact decisions
 or dead-letter records.
 
+![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
+
 ## Install
 
 ```bash
@@ -376,8 +378,6 @@ Flags on both binaries: `--aws-region REGION` and `--aws-endpoint-url URL`
 cadence, default 10). On `SIGINT`/`SIGTERM` the agent flushes its final part before
 exiting, so a rolling deploy loses nothing. Dead-letter output stays a local
 NDJSON file — mirror it separately if you need it centralized.
-
-![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
 
 ## Documentation
 
