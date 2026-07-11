@@ -22,7 +22,10 @@
 #include <sys/stat.h>
 
 #include <arrow/api.h>
+#include <arrow/buffer.h>
 #include <arrow/io/file.h>
+#include <arrow/io/memory.h>
+#include <arrow/ipc/reader.h>
 #include <arrow/ipc/writer.h>
 #include <arrow/util/compression.h>
 #include <httplib.h>
@@ -122,6 +125,90 @@ bool body_is_ndjson(std::string_view body) {
     return false;
 }
 
+std::string lower_ascii(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (char c : s) out.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return out;
+}
+
+bool is_arrow_ipc_content_type(std::string_view content_type) {
+    std::string ct = lower_ascii(content_type);
+    return ct.find("application/vnd.apache.arrow.stream") != std::string::npos ||
+           ct.find("application/vnd.apache.arrow.file") != std::string::npos ||
+           ct.find("application/x-arrow-ipc") != std::string::npos ||
+           ct.find("application/x-apache-arrow") != std::string::npos;
+}
+
+bool is_ndjson_content_type(std::string_view content_type) {
+    std::string ct = lower_ascii(content_type);
+    return ct.find("application/x-ndjson") != std::string::npos ||
+           ct.find("application/ndjson") != std::string::npos ||
+           ct.find("application/jsonl") != std::string::npos;
+}
+
+std::string status_message(const arrow::Status& status, std::string_view context) {
+    std::string out(context);
+    out += ": ";
+    out += status.ToString();
+    return out;
+}
+
+template <typename T>
+T value_or_throw(arrow::Result<T> result, std::string_view context) {
+    if (!result.ok()) throw std::runtime_error(status_message(result.status(), context));
+    return std::move(result).ValueOrDie();
+}
+
+void validate_arrow_batch(const std::shared_ptr<arrow::RecordBatch>& batch) {
+    if (!batch) return;
+    arrow::Status status = batch->ValidateFull();
+    if (!status.ok()) throw std::runtime_error(status_message(status, "arrow ipc batch validation"));
+}
+
+template <typename Fn>
+uint64_t for_each_arrow_ipc_batch(std::string_view body, Fn&& fn) {
+    if (body.empty()) return 0;
+    auto buffer = std::make_shared<arrow::Buffer>(
+        reinterpret_cast<const uint8_t*>(body.data()),
+        static_cast<int64_t>(body.size()));
+    uint64_t rows = 0;
+
+    auto input = std::make_shared<arrow::io::BufferReader>(buffer);
+    auto stream_reader = arrow::ipc::RecordBatchStreamReader::Open(input);
+    if (stream_reader.ok()) {
+        auto reader = stream_reader.ValueOrDie();
+        while (true) {
+            auto batch = value_or_throw(reader->Next(), "arrow ipc stream read");
+            if (!batch) break;
+            if (batch->num_rows() > 0) {
+                validate_arrow_batch(batch);
+                rows += static_cast<uint64_t>(batch->num_rows());
+                fn(batch);
+            }
+        }
+        return rows;
+    }
+
+    input = std::make_shared<arrow::io::BufferReader>(buffer);
+    auto file_reader = arrow::ipc::RecordBatchFileReader::Open(input);
+    if (!file_reader.ok()) {
+        throw std::runtime_error(status_message(stream_reader.status(), "arrow ipc stream open") +
+                                 "; " + status_message(file_reader.status(), "arrow ipc file open"));
+    }
+    auto reader = file_reader.ValueOrDie();
+    int num_batches = reader->num_record_batches();
+    for (int i = 0; i < num_batches; ++i) {
+        auto batch = value_or_throw(reader->ReadRecordBatch(i), "arrow ipc file read");
+        if (batch && batch->num_rows() > 0) {
+            validate_arrow_batch(batch);
+            rows += static_cast<uint64_t>(batch->num_rows());
+            fn(batch);
+        }
+    }
+    return rows;
+}
+
 std::vector<std::string> split_lines(std::string_view body) {
     std::vector<std::string> out;
     size_t start = 0;
@@ -144,7 +231,7 @@ struct InputConfig {
 };
 
 struct OutputConfig {
-    std::string type = "stdout";  // stdout | ndjson
+    std::string type = "stdout";  // stdout | ndjson | arrow | none
     std::string path;
     std::string dead_letter_path;
 };
@@ -226,7 +313,11 @@ public:
         }
         build_model_columns_from_engine();
         arrow_output_ = (config_.output.type == "arrow");
+        output_disabled_ = (config_.output.type == "none" || config_.output.type == "disabled");
         const bool have_path = !config_.output.path.empty();
+        if (output_disabled_) {
+            return;
+        }
         if (arrow_output_ && !have_path) {
             throw std::runtime_error("arrow output requires an --output-path");
         }
@@ -531,12 +622,12 @@ private:
         if (!records.empty()) evaluate(records);
     }
 
-    void write_input_stats() {
+    void write_input_stats(bool force = false) {
         if (config_.output.path.empty()) return;
         const int64_t now = now_ms();
         {
             std::lock_guard<std::mutex> lock(stats_mu_);
-            if (now - last_stats_ms_ < 1000) return;
+            if (!force && now - last_stats_ms_ < 1000) return;
             last_stats_ms_ = now;
         }
         std::string stats = "{\"ts_ms\":";
@@ -597,7 +688,28 @@ private:
         }
         release_engine(e, pooled);
         write_decisions(result);
-        write_input_stats();
+        write_input_stats(true);
+        maybe_init_pool();
+    }
+
+    void evaluate_arrow_ipc_body(const std::string& body) {
+        input_bytes_.fetch_add(body.size(), std::memory_order_relaxed);
+        uint64_t records = for_each_arrow_ipc_batch(body, [&](const std::shared_ptr<arrow::RecordBatch>& batch) {
+            if (!batch || batch->num_rows() <= 0) return;
+            bool pooled = false;
+            RuleEngine* e = acquire_engine(pooled);
+            BatchResult result;
+            try {
+                result = e->evaluate_record_batch(batch);
+            } catch (...) {
+                release_engine(e, pooled);
+                throw;
+            }
+            release_engine(e, pooled);
+            write_decisions(result);
+        });
+        input_records_.fetch_add(records, std::memory_order_relaxed);
+        write_input_stats(true);
         maybe_init_pool();
     }
 
@@ -675,6 +787,7 @@ private:
     }
 
     void write_decisions(const BatchResult& result) {
+        if (output_disabled_) return;
         {
             std::lock_guard<std::mutex> lock(out_mu_);
             build_model_columns(result);
@@ -835,7 +948,11 @@ private:
         httplib::Server server;
         server.Post("/v1/logs", [&](const httplib::Request& req, httplib::Response& res) {
             try {
-                if (!config_.dedupe.enabled && body_is_ndjson(req.body)) {
+                const std::string content_type = req.get_header_value("Content-Type");
+                if (is_arrow_ipc_content_type(content_type)) {
+                    evaluate_arrow_ipc_body(req.body);
+                } else if (!config_.dedupe.enabled &&
+                           (is_ndjson_content_type(content_type) || body_is_ndjson(req.body))) {
                     evaluate_body(req.body);
                 } else {
                     submit_lines(split_lines(req.body));
@@ -888,6 +1005,7 @@ private:
     std::shared_ptr<arrow::Schema> arrow_schema_;
     std::vector<std::string> model_columns_;
     bool arrow_output_ = false;
+    bool output_disabled_ = false;
     bool s3_output_ = false;
     std::string s3_prefix_;
     std::string staging_dir_;
@@ -1031,7 +1149,7 @@ Options parse_args(int argc, char** argv) {
                 << "  --host HOST --port PORT     HTTP input bind, default 127.0.0.1:9480\n"
                 << "  --batch-size N              default 2048\n"
                 << "  --eval-shards N             parallel eval engines for stateless rulesets, default 1\n"
-                << "  --output stdout|ndjson|arrow  default stdout\n"
+                << "  --output stdout|ndjson|arrow|none  default stdout\n"
                 << "  --output-path PATH|s3://...  output file, or an s3:// prefix for rolled part objects\n"
                 << "  --dead-letter-path PATH     write malformed/skipped records as NDJSON\n"
                 << "  --model name=PATH|s3://...  register ONNX model, repeatable\n"

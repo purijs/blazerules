@@ -79,6 +79,17 @@ class AgentArrowOutputTest(unittest.TestCase):
             self.assertEqual(data["decision"], ["APPROVE", "FLAG", "FLAG"])
             self.assertEqual(data["winning_rule_id"], ["", "high_amount", "high_amount"])
 
+    def test_output_none_suppresses_row_stream(self):
+        with tempfile.TemporaryDirectory() as d:
+            rules_path = Path(d) / "rules.yaml"
+            rules_path.write_text(json.dumps(RULES))
+            ndjson = ("\n".join(json.dumps(r) for r in RECORDS) + "\n").encode()
+            completed = subprocess.run(
+                [_AGENT, "--rules", str(rules_path), "--input", "stdin", "--output", "none"],
+                input=ndjson, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            )
+            self.assertEqual(completed.stdout, b"")
+
 
 if __name__ == "__main__":
     unittest.main()
