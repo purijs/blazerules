@@ -4,7 +4,7 @@ const f2 = n => Number(n || 0).toLocaleString(undefined, {maximumFractionDigits:
 const dt = ms => ms ? new Date(ms).toLocaleString() : "";
 const tm = ms => ms ? new Date(ms).toLocaleTimeString() : "";
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
-const app = {decisionOffset: 0, decisionLimit: 800, filtered: false, yamlRaw: "", yamlLines: [], folded: new Set(), tab: "overview", instanceCounts: {}, scope: ""};
+const app = {decisionOffset: 0, decisionLimit: 800, filtered: false, yamlRaw: "", yamlLines: [], folded: new Set(), tab: "overview", instanceCounts: {}, scope: "", timelineLive: true};
 const scopeQ = (sep) => app.scope ? `${sep}instance=${encodeURIComponent(app.scope)}` : "";
 
 function fmtBytes(n) {
@@ -46,7 +46,27 @@ async function j(path) {
   return res.json();
 }
 
+function compactSeries(points, maxPoints = 180) {
+  points = points || [];
+  if (points.length <= maxPoints) return points;
+  const out = [];
+  const step = points.length / maxPoints;
+  for (let i = 0; i < maxPoints; ++i) {
+    const a = Math.floor(i * step);
+    const b = Math.max(a + 1, Math.floor((i + 1) * step));
+    const slice = points.slice(a, b);
+    const n = slice.length || 1;
+    out.push({
+      ts_ms: slice[Math.floor(n / 2)]?.ts_ms || points[a]?.ts_ms || 0,
+      rps: slice.reduce((sum, p) => sum + Number(p.rps || 0), 0) / n,
+      bytes_per_sec: slice.reduce((sum, p) => sum + Number(p.bytes_per_sec || 0), 0) / n
+    });
+  }
+  return out;
+}
+
 function spark(points) {
+  points = compactSeries(points, 180);
   if (!points || !points.length) return "";
   const vals = points.map(p => p.bytes_per_sec || 0);
   const max = Math.max(...vals, 1);
@@ -54,13 +74,50 @@ function spark(points) {
 }
 
 function timeline(points) {
+  points = compactSeries(points, 180);
   if (!points || !points.length) return "";
   const vals = points.map(p => p.rps || 0);
   const max = Math.max(...vals, 1);
   return vals.map((v, i) => {
     const p = points[i] || {};
-    return `<div class="tick" style="height:${Math.max(2, v / max * 88)}px" title="${fmt(v)} records/sec, ${fmtBytes(p.bytes_per_sec || 0)}/sec"></div>`;
+    return `<div class="tick" style="height:${Math.max(2, v / max * 88)}px" title="${fmt(v)} events/sec, ${fmtBytes(p.bytes_per_sec || 0)}/sec input"></div>`;
   }).join("");
+}
+
+function formatTimelineLabel(ms, spanMs) {
+  const d = new Date(ms);
+  if (spanMs <= 2 * 60 * 1000) return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit", second: "2-digit"});
+  if (spanMs <= 24 * 60 * 60 * 1000) return d.toLocaleTimeString([], {hour: "2-digit", minute: "2-digit"});
+  if (spanMs <= 7 * 24 * 60 * 60 * 1000) return d.toLocaleDateString([], {month: "short", day: "numeric"}) + " " + d.toLocaleTimeString([], {hour: "2-digit"});
+  return d.toLocaleDateString([], {month: "short", day: "numeric"});
+}
+
+function timelineAxis(fromMs, toMs) {
+  const span = Math.max(1, toMs - fromMs);
+  const labels = [];
+  for (let i = 0; i < 5; ++i) labels.push(formatTimelineLabel(fromMs + span * i / 4, span));
+  return labels.map(x => `<span>${esc(x)}</span>`).join("");
+}
+
+function timelineUrl() {
+  const p = new URLSearchParams();
+  if (app.scope) p.set("instance", app.scope);
+  if (app.timelineLive) {
+    p.set("range_ms", $("timelineRange").value || "300000");
+  } else {
+    const from = localMs("timelineFrom");
+    const to = localMs("timelineTo");
+    if (from) p.set("from_ms", String(from));
+    if (to) p.set("to_ms", String(to));
+  }
+  return `/api/timeline?${p.toString()}`;
+}
+
+function renderTimeline(tl) {
+  const points = tl.series || [];
+  $("spark").innerHTML = `<polyline fill="none" stroke="#2563eb" stroke-width="2" points="${spark(points)}"></polyline>`;
+  $("timelineBars").innerHTML = timeline(points);
+  $("timelineAxis").innerHTML = timelineAxis(tl.from_ms || 0, tl.to_ms || Date.now());
 }
 
 function planBars(obj, limit = 24) {
@@ -287,16 +344,36 @@ function setScope() {
   };
 }
 
+function setTimelineControls() {
+  $("timelineRange").onchange = () => {
+    app.timelineLive = true;
+    $("timelineFrom").value = "";
+    $("timelineTo").value = "";
+    refresh();
+  };
+  $("applyTimeline").onclick = () => {
+    app.timelineLive = false;
+    refresh();
+  };
+  $("liveTimeline").onclick = () => {
+    app.timelineLive = true;
+    $("timelineFrom").value = "";
+    $("timelineTo").value = "";
+    refresh();
+  };
+}
+
 async function refresh() {
   try {
-    const [s, h, recent, r, e, m, rs] = await Promise.all([
+    const [s, h, recent, r, e, m, rs, tl] = await Promise.all([
       j(`/api/summary${scopeQ("?")}`),
       j("/api/health"),
       app.filtered ? Promise.resolve(null) : j(`/api/decisions?limit=${app.decisionLimit}${scopeQ("&")}`),
       j(`/api/rules?limit=200${scopeQ("&")}`),
-      j("/api/errors?limit=300"),
+      j(`/api/errors?limit=300${scopeQ("&")}`),
       j("/api/metrics"),
-      j(`/api/ruleset${app.scope ? "?ruleset=" + encodeURIComponent(app.scope) : ""}`)
+      j(`/api/ruleset${app.scope ? "?ruleset=" + encodeURIComponent(app.scope) : ""}`),
+      j(timelineUrl())
     ]);
     $("topline").textContent = `version ${s.version || ""} | ruleset ${s.active_ruleset_version || "unknown"} | updated ${tm(s.last_update_ms)}`;
     const active = (h.sources || []).some(x => x.active);
@@ -319,9 +396,7 @@ async function refresh() {
     const lat = [["total", t.total], ["evaluation", t.evaluation], ["transpose", t.transpose]];
     const latMax = Math.max(...lat.map(x => x[1] || 0), 1);
     $("latencyBars").innerHTML = o.has_metrics ? lat.map(x => `<div class="barrow"><span>${x[0]}</span><div class="bar"><span style="width:${Math.min(100, (x[1] || 0) / latMax * 100)}%"></span></div><span class="mono">${f2(x[1])} ms</span></div>`).join("") : `<div class="empty">No metrics endpoint configured for engine latency.</div>`;
-    $("spark").innerHTML = `<polyline fill="none" stroke="#2563eb" stroke-width="2" points="${spark(s.history)}"></polyline>`;
-    $("timelineBars").innerHTML = timeline(s.history);
-    $("timelineHint").textContent = `${fmt(o.recent_records_per_sec)} rec/s evaluated · ${fmtBytes(o.recent_bytes_per_sec)}/s decision log`;
+    renderTimeline(tl);
 
     const decisionTotal = Object.values(s.decision_counts || {}).reduce((a, b) => a + b, 0);
     $("decisionDist").innerHTML = rows(s.decision_counts, decisionTotal);
@@ -363,6 +438,7 @@ async function refresh() {
 
 setTabs();
 setScope();
+setTimelineControls();
 setDecisionControls();
 setModelControls();
 setYamlControls();

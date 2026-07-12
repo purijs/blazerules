@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -21,11 +22,12 @@ public:
 
     std::string health_json() const;
     std::string summary_json(const std::string& instance) const;
+    std::string timeline_json(const std::string& instance, int64_t from_ms, int64_t to_ms, int64_t range_ms) const;
     std::string metrics_json() const;
     std::string decisions_json(const DecisionQuery& query) const;
     std::string models_json(int bins, const std::string& instance) const;
     std::string rules_json(size_t limit, const std::string& instance) const;
-    std::string errors_json(size_t limit) const;
+    std::string errors_json(size_t limit, const std::string& instance) const;
     std::string benchmarks_json() const;
     std::string ruleset_json(const std::string& selector) const;
 
@@ -47,7 +49,13 @@ private:
     uintmax_t last_decision_log_bytes_ = 0;
     int64_t last_decision_log_bytes_ms_ = 0;
     double last_input_bytes_ = 0.0;
+    double last_input_records_ = 0.0;
     int64_t last_input_bytes_ms_ = 0;
+    int64_t last_input_records_ms_ = 0;
+    std::map<std::string, double> last_input_bytes_by_instance_;
+    std::map<std::string, double> last_input_records_by_instance_;
+    std::map<std::string, int64_t> last_input_bytes_ms_by_instance_;
+    std::map<std::string, int64_t> last_input_records_ms_by_instance_;
     std::string s3_source_;
     bool s3_source_is_dir_ = false;
     std::string s3_local_root_;

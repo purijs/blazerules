@@ -44,6 +44,7 @@ struct DecisionState {
 
 struct ErrorRow {
     int64_t ts_ms = 0;
+    std::string instance;
     std::string code;
     std::string message;
     std::string source;
@@ -54,6 +55,8 @@ struct ErrorRow {
 struct ErrorState {
     std::vector<ErrorRow> recent;
     std::map<std::string, int64_t> code_counts;
+    std::map<std::string, int64_t> instance_counts;
+    std::map<std::string, std::map<std::string, int64_t>> code_counts_by_instance;
     int64_t rows_seen = 0;
 };
 
@@ -142,6 +145,7 @@ struct HistoryPoint {
     double total_ms = 0.0;
     double evaluation_ms = 0.0;
     double transpose_ms = 0.0;
+    int64_t samples = 1;
 };
 
 struct DashboardSnapshot {
@@ -153,9 +157,23 @@ struct DashboardSnapshot {
     BenchmarkState benchmarks;
     RulesetState ruleset;
     std::vector<HistoryPoint> history;
+    std::map<std::string, std::vector<HistoryPoint>> history_by_instance;
+    std::vector<HistoryPoint> timeline_1s;
+    std::vector<HistoryPoint> timeline_1m;
+    std::vector<HistoryPoint> timeline_1h;
+    std::map<std::string, std::vector<HistoryPoint>> timeline_1s_by_instance;
+    std::map<std::string, std::vector<HistoryPoint>> timeline_1m_by_instance;
+    std::map<std::string, std::vector<HistoryPoint>> timeline_1h_by_instance;
     double recent_rps = 0.0;
     double recent_bytes_per_sec = 0.0;
     double recent_input_bytes_per_sec = 0.0;
+    double recent_input_records_per_sec = 0.0;
+    std::map<std::string, double> recent_input_bytes_per_sec_by_instance;
+    std::map<std::string, double> recent_input_records_per_sec_by_instance;
+    double input_records_total = 0.0;
+    double input_bytes_total = 0.0;
+    std::map<std::string, double> input_records_total_by_instance;
+    std::map<std::string, double> input_bytes_total_by_instance;
 };
 
 struct ModelHistogramBin {

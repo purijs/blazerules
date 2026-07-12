@@ -56,8 +56,8 @@ private:
     void index_push(const DecisionRow& row);
     void index_reset();
     void ingest_row(DecisionRow&& row);
-    void read_ndjson(LogSource& src, uintmax_t bytes);
-    void read_arrow(LogSource& src, SourceStatus& status);
+    void read_ndjson(LogSource& src, uintmax_t bytes, int64_t& rows_budget, uintmax_t& bytes_budget);
+    void read_arrow(LogSource& src, SourceStatus& status, int64_t& rows_budget, uintmax_t& bytes_budget);
     void index_arrow_batch(const arrow::RecordBatch& batch, const std::string& fallback_instance);
     void discover_sources();
 
@@ -105,7 +105,7 @@ public:
     ErrorState update(SourceStatus& status);
 
 private:
-    void read_file(const std::string& path, uintmax_t& offset);
+    void read_file(const std::string& path, const std::string& instance, uintmax_t& offset);
     std::string root_;
     bool is_dir_ = false;
     size_t tail_lines_ = 5000;

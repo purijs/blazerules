@@ -337,8 +337,10 @@ public:
             if (!arrow_output_) open_ndjson_part();
             s3_sync_thread_ = std::thread([this] { s3_sync_loop(); });
         } else if (!arrow_output_ && have_path) {
+            ensure_parent_dir(config_.output.path);
             out_file_.open(config_.output.path, std::ios::out | std::ios::trunc);
             if (!out_file_) throw std::runtime_error("failed to open output: " + config_.output.path);
+            output_inode_ = file_inode(config_.output.path);
         }
     }
 
@@ -357,14 +359,7 @@ public:
             }
             return;
         }
-        if (arrow_writer_) {
-            (void) arrow_writer_->Close();
-            arrow_writer_.reset();
-        }
-        if (arrow_sink_) {
-            (void) arrow_sink_->Close();
-            arrow_sink_.reset();
-        }
+        close_arrow_writer();
     }
 
     void run() {
@@ -395,18 +390,50 @@ private:
         return s3_output_ ? current_part_path_ : config_.output.path;
     }
 
+    static void ensure_parent_dir(const std::string& path) {
+        if (path.empty()) return;
+        std::error_code ec;
+        const fs::path parent = fs::path(path).parent_path();
+        if (!parent.empty()) fs::create_directories(parent, ec);
+    }
+
+    static bool path_missing(const std::string& path) {
+        if (path.empty()) return false;
+        std::error_code ec;
+        return !fs::exists(path, ec);
+    }
+
+    static ino_t file_inode(const std::string& path) {
+        struct stat st{};
+        return ::stat(path.c_str(), &st) == 0 ? st.st_ino : 0;
+    }
+
     void open_ndjson_part() {
+        ensure_parent_dir(current_part_path_);
         out_file_.open(current_part_path_, std::ios::out | std::ios::trunc);
         if (!out_file_) throw std::runtime_error("failed to open ndjson part: " + current_part_path_);
+        output_inode_ = file_inode(current_part_path_);
+    }
+
+    void close_arrow_writer() {
+        if (arrow_writer_) {
+            (void) arrow_writer_->Close();
+            arrow_writer_.reset();
+        }
+        if (arrow_sink_) {
+            (void) arrow_sink_->Close();
+            arrow_sink_.reset();
+        }
+        output_inode_ = 0;
     }
 
     void close_current_part() {
         if (arrow_output_) {
-            if (arrow_writer_) { (void) arrow_writer_->Close(); arrow_writer_.reset(); }
-            if (arrow_sink_) { (void) arrow_sink_->Close(); arrow_sink_.reset(); }
+            close_arrow_writer();
         } else if (out_file_.is_open()) {
             out_file_.flush();
             out_file_.close();
+            output_inode_ = 0;
         }
     }
 
@@ -471,6 +498,7 @@ private:
 
     void open_arrow_writer(const std::string& path) {
         if (!arrow_schema_) build_arrow_schema();
+        ensure_parent_dir(path);
         auto sink_result = arrow::io::FileOutputStream::Open(path);
         if (!sink_result.ok()) {
             throw std::runtime_error("failed to open arrow output: " + sink_result.status().ToString());
@@ -489,6 +517,40 @@ private:
             throw std::runtime_error("failed to open arrow writer: " + writer_result.status().ToString());
         }
         arrow_writer_ = *writer_result;
+        output_inode_ = file_inode(path);
+    }
+
+    void ensure_arrow_output_open_locked() {
+        const std::string path = current_target_path();
+        if (path.empty()) return;
+        const bool missing = path_missing(path);
+        const ino_t current_inode = file_inode(path);
+        const bool replaced = arrow_writer_ && current_inode != 0 && output_inode_ != 0 &&
+                              current_inode != output_inode_;
+        if (arrow_writer_ && !missing && !replaced) return;
+        close_arrow_writer();
+        if (missing && s3_output_) part_bytes_ = 0;
+        open_arrow_writer(path);
+    }
+
+    void ensure_ndjson_output_open_locked() {
+        const std::string path = current_target_path();
+        if (path.empty()) return;
+        const bool missing = path_missing(path);
+        const ino_t current_inode = file_inode(path);
+        const bool replaced = out_file_.is_open() && current_inode != 0 && output_inode_ != 0 &&
+                              current_inode != output_inode_;
+        if (out_file_.is_open() && !missing && !replaced) return;
+        if (out_file_.is_open()) {
+            out_file_.flush();
+            out_file_.close();
+            output_inode_ = 0;
+        }
+        if (missing && s3_output_) part_bytes_ = 0;
+        ensure_parent_dir(path);
+        out_file_.open(path, std::ios::out | std::ios::app);
+        if (!out_file_) throw std::runtime_error("failed to reopen output: " + path);
+        output_inode_ = file_inode(path);
     }
 
     static EngineConfig make_engine_config(const InstanceConfig& config) {
@@ -771,7 +833,7 @@ private:
         }
         auto batch = arrow::RecordBatch::Make(arrow_schema_, n, arrays);
         std::lock_guard<std::mutex> lock(out_mu_);
-        if (!arrow_writer_) open_arrow_writer(current_target_path());
+        ensure_arrow_output_open_locked();
         arrow::Status status = arrow_writer_->WriteRecordBatch(*batch);
         if (!status.ok()) throw std::runtime_error("failed to write arrow batch: " + status.ToString());
         const int64_t now = now_ms();
@@ -845,6 +907,7 @@ private:
             buffer += "}\n";
         }
         std::lock_guard<std::mutex> lock(out_mu_);
+        ensure_ndjson_output_open_locked();
         if (out_file_.is_open()) {
             out_file_ << buffer;
             const int64_t now = now_ms();
@@ -879,12 +942,6 @@ private:
             }
         }
         if (!batch.empty()) submit_lines(batch);
-    }
-
-    // Return the inode of a path, or 0 if it cannot be stat'd.
-    static ino_t file_inode(const std::string& path) {
-        struct stat st{};
-        return ::stat(path.c_str(), &st) == 0 ? st.st_ino : 0;
     }
 
     void run_file_tail() {
@@ -997,6 +1054,7 @@ private:
     std::mutex stats_mu_;
     int64_t last_flush_ms_ = 0;
     int64_t last_stats_ms_ = 0;
+    ino_t output_inode_ = 0;
     std::atomic<int64_t> last_error_log_ms_{0};
     std::atomic<uint64_t> input_bytes_{0};
     std::atomic<uint64_t> input_records_{0};

@@ -58,6 +58,13 @@ void register_routes(httplib::Server& server, DashboardServer& dashboard) {
     server.Get("/api/summary", [&](const httplib::Request& req, httplib::Response& res) {
         res.set_content(dashboard.summary_json(string_from_request(req, "instance")), "application/json");
     });
+    server.Get("/api/timeline", [&](const httplib::Request& req, httplib::Response& res) {
+        res.set_content(dashboard.timeline_json(string_from_request(req, "instance"),
+                                                int64_from_request(req, "from_ms", 0),
+                                                int64_from_request(req, "to_ms", 0),
+                                                int64_from_request(req, "range_ms", 0)),
+                        "application/json");
+    });
     server.Get("/api/metrics", [&](const httplib::Request&, httplib::Response& res) {
         res.set_content(dashboard.metrics_json(), "application/json");
     });
@@ -84,7 +91,8 @@ void register_routes(httplib::Server& server, DashboardServer& dashboard) {
         res.set_content(dashboard.models_json(bins, string_from_request(req, "instance")), "application/json");
     });
     server.Get("/api/errors", [&](const httplib::Request& req, httplib::Response& res) {
-        res.set_content(dashboard.errors_json(static_cast<size_t>(limit_from_request(req, "limit", 200, 5000))),
+        res.set_content(dashboard.errors_json(static_cast<size_t>(limit_from_request(req, "limit", 200, 5000)),
+                                              string_from_request(req, "instance")),
                         "application/json");
     });
     server.Get("/api/benchmarks", [&](const httplib::Request&, httplib::Response& res) {

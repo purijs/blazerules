@@ -21,6 +21,13 @@
 
 namespace fs = std::filesystem;
 
+namespace {
+
+constexpr int64_t kDecisionRowsPerPoll = 250000;
+constexpr uintmax_t kDecisionBytesPerPoll = 64ULL * 1024ULL * 1024ULL;
+
+}  // namespace
+
 DecisionLogTailer::DecisionLogTailer(std::string root, bool is_dir, size_t tail_lines, size_t index_capacity)
     : root_(std::move(root)), is_dir_(is_dir), tail_lines_(tail_lines),
       index_capacity_(index_capacity) {}
@@ -48,6 +55,24 @@ bool looks_like_dead_letter(const std::string& filename) {
            low.find("dead_letter") != std::string::npos ||
            low.find("dead-letter") != std::string::npos ||
            low.find("deadletter") != std::string::npos;
+}
+
+std::string dead_letter_instance_from_path(const std::string& path) {
+    std::string stem = fs::path(path).stem().string();
+    const std::vector<std::string> suffixes = {
+        "_dlq", "-dlq", ".dlq",
+        "_dead_letter", "-dead_letter", ".dead_letter",
+        "_dead-letter", "-dead-letter", ".dead-letter",
+        "_deadletter", "-deadletter", ".deadletter"
+    };
+    for (const auto& suffix : suffixes) {
+        if (stem.size() > suffix.size() &&
+            stem.compare(stem.size() - suffix.size(), suffix.size(), suffix) == 0) {
+            stem.resize(stem.size() - suffix.size());
+            break;
+        }
+    }
+    return stem;
 }
 
 void parse_ndjson_model_scores(std::string_view line, std::vector<std::pair<std::string, double>>& out) {
@@ -391,6 +416,15 @@ DecisionState DecisionLogTailer::update(SourceStatus& status) {
     status.last_error = last_error;
 
     std::unique_lock<std::shared_mutex> index_lock(index_mu_);
+    if (!any_active) {
+        cached_ = DecisionState{};
+        recent_.clear();
+        score_sum_ = 0.0;
+        sources_.clear();
+        index_reset();
+        status.last_success_ms = now_ms();
+        return cached_;
+    }
     if (shrink) {
         cached_ = DecisionState{};
         recent_.clear();
@@ -406,6 +440,8 @@ DecisionState DecisionLogTailer::update(SourceStatus& status) {
     }
 
     for (auto& src : sources_) {
+        int64_t rows_budget = kDecisionRowsPerPoll;
+        uintmax_t bytes_budget = kDecisionBytesPerPoll;
         std::error_code ec;
         uintmax_t bytes = fs::file_size(src.path, ec);
         if (ec) continue;
@@ -419,8 +455,8 @@ DecisionState DecisionLogTailer::update(SourceStatus& status) {
             }
         }
         if (!src.format_detected) continue;
-        if (src.arrow_mode) read_arrow(src, status);
-        else read_ndjson(src, bytes);
+        if (src.arrow_mode) read_arrow(src, status, rows_budget, bytes_budget);
+        else read_ndjson(src, bytes, rows_budget, bytes_budget);
     }
 
     cached_.recent.assign(recent_.begin(), recent_.end());
@@ -453,19 +489,21 @@ void DecisionLogTailer::ingest_row(DecisionRow&& row) {
     while (recent_.size() > tail_lines_) recent_.pop_front();
 }
 
-void DecisionLogTailer::read_ndjson(LogSource& src, uintmax_t bytes) {
-    (void)bytes;
+void DecisionLogTailer::read_ndjson(LogSource& src, uintmax_t bytes, int64_t& rows_budget, uintmax_t& bytes_budget) {
     std::ifstream in(src.path, std::ios::binary);
     if (!in) return;
     in.seekg(static_cast<std::streamoff>(src.read_offset));
     std::string line;
     uintmax_t consumed = src.read_offset;
-    while (std::getline(in, line)) {
+    const uintmax_t start_offset = src.read_offset;
+    while (rows_budget > 0 && bytes_budget > 0 && consumed < bytes && std::getline(in, line)) {
         // A final line with no trailing '\n' (a partial record still being appended)
         // leaves eofbit set: skip it and re-read it complete on the next poll. Only
         // advance the offset past fully '\n'-terminated lines to avoid double-counting.
         if (in.eof()) break;
-        consumed += static_cast<uintmax_t>(line.size()) + 1;
+        const uintmax_t line_bytes = static_cast<uintmax_t>(line.size()) + 1;
+        consumed += line_bytes;
+        bytes_budget = line_bytes >= bytes_budget ? 0 : bytes_budget - line_bytes;
         std::string_view sv(line);
         if (!sv.empty() && sv.back() == '\r') sv.remove_suffix(1);
         if (trim(sv).empty()) continue;
@@ -481,11 +519,13 @@ void DecisionLogTailer::read_ndjson(LogSource& src, uintmax_t bytes) {
         row.winning_rule_id = json_string(sv, "winning_rule_id").value_or("");
         parse_ndjson_model_scores(sv, row.model_scores);
         ingest_row(std::move(row));
+        --rows_budget;
+        if (consumed - start_offset >= kDecisionBytesPerPoll) break;
     }
     src.read_offset = consumed;
 }
 
-void DecisionLogTailer::read_arrow(LogSource& src, SourceStatus& status) {
+void DecisionLogTailer::read_arrow(LogSource& src, SourceStatus& status, int64_t& rows_budget, uintmax_t& bytes_budget) {
     auto file_result = arrow::io::ReadableFile::Open(src.path);
     if (!file_result.ok()) {
         status.last_error = "failed to open arrow decision log";
@@ -493,8 +533,9 @@ void DecisionLogTailer::read_arrow(LogSource& src, SourceStatus& status) {
     }
     std::shared_ptr<arrow::io::RandomAccessFile> file = *file_result;
     if (!file->Seek(static_cast<int64_t>(src.read_offset)).ok()) return;
+    const uintmax_t start_offset = src.read_offset;
     const arrow::ipc::IpcReadOptions read_options = arrow::ipc::IpcReadOptions::Defaults();
-    while (true) {
+    while (rows_budget > 0 && bytes_budget > 0) {
         auto message_result = arrow::ipc::ReadMessage(file.get());
         if (!message_result.ok()) break;
         std::unique_ptr<arrow::ipc::Message> message = std::move(*message_result);
@@ -505,11 +546,20 @@ void DecisionLogTailer::read_arrow(LogSource& src, SourceStatus& status) {
         } else if (message->type() == arrow::ipc::MessageType::RECORD_BATCH && src.arrow_schema) {
             auto batch_result = arrow::ipc::ReadRecordBatch(*message, src.arrow_schema,
                                                             src.dict_memo.get(), read_options);
-            if (batch_result.ok()) index_arrow_batch(**batch_result, src.instance_label);
+            if (batch_result.ok()) {
+                index_arrow_batch(**batch_result, src.instance_label);
+                rows_budget -= std::max<int64_t>(0, (*batch_result)->num_rows());
+            }
         }
         auto position = file->Tell();
         if (!position.ok()) break;
+        const uintmax_t new_offset = static_cast<uintmax_t>(*position);
+        if (new_offset > src.read_offset) {
+            const uintmax_t delta = new_offset - src.read_offset;
+            bytes_budget = delta >= bytes_budget ? 0 : bytes_budget - delta;
+        }
         src.read_offset = static_cast<uintmax_t>(*position);
+        if (src.read_offset - start_offset >= kDecisionBytesPerPoll) break;
     }
 }
 
@@ -551,7 +601,7 @@ void DecisionLogTailer::index_arrow_batch(const arrow::RecordBatch& batch, const
 DeadLetterTailer::DeadLetterTailer(std::string root, bool is_dir, size_t tail_lines)
     : root_(std::move(root)), is_dir_(is_dir), tail_lines_(tail_lines) {}
 
-void DeadLetterTailer::read_file(const std::string& path, uintmax_t& offset) {
+void DeadLetterTailer::read_file(const std::string& path, const std::string& instance, uintmax_t& offset) {
     std::ifstream in(path, std::ios::binary);
     if (!in) return;
     in.seekg(static_cast<std::streamoff>(offset));
@@ -565,6 +615,7 @@ void DeadLetterTailer::read_file(const std::string& path, uintmax_t& offset) {
         if (trim(sv).empty()) continue;
         ErrorRow row;
         row.ts_ms = static_cast<int64_t>(json_number(sv, "ts_ms").value_or(0));
+        row.instance = json_string(sv, "instance").value_or(instance);
         row.code = json_string(sv, "code").value_or("");
         row.message = json_string(sv, "message").value_or("");
         row.source = json_string(sv, "source").value_or("");
@@ -572,6 +623,10 @@ void DeadLetterTailer::read_file(const std::string& path, uintmax_t& offset) {
         row.column_name = json_string(sv, "column_name").value_or("");
         cached_.rows_seen += 1;
         if (!row.code.empty()) cached_.code_counts[row.code] += 1;
+        if (!row.instance.empty()) {
+            cached_.instance_counts[row.instance] += 1;
+            if (!row.code.empty()) cached_.code_counts_by_instance[row.instance][row.code] += 1;
+        }
         recent_.push_back(std::move(row));
         while (recent_.size() > tail_lines_) recent_.pop_front();
     }
@@ -619,12 +674,22 @@ ErrorState DeadLetterTailer::update(SourceStatus& status) {
     status.active = any_active;
     status.last_error.clear();
 
+    if (!any_active) {
+        cached_ = ErrorState{};
+        recent_.clear();
+        offsets_.clear();
+        status.last_success_ms = now_ms();
+        return cached_;
+    }
     if (shrink) {
         cached_ = ErrorState{};
         recent_.clear();
         for (auto& kv : offsets_) kv.second = 0;
     }
-    for (const auto& f : files) read_file(f, offsets_[f]);
+    for (const auto& f : files) {
+        const std::string instance = is_dir_ ? dead_letter_instance_from_path(f) : std::string{};
+        read_file(f, instance, offsets_[f]);
+    }
 
     cached_.recent.assign(recent_.begin(), recent_.end());
     status.last_success_ms = now_ms();

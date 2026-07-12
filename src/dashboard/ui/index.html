@@ -30,13 +30,30 @@
     <div class="grid" id="cards"></div>
     <div class="grid">
       <div class="panel span7">
-        <h2>Event Timeline</h2>
+        <div class="panel-head">
+          <h2>Event Timeline</h2>
+          <div class="timeline-controls">
+            <select id="timelineRange" title="Quick range">
+              <option value="30000">Last 30s</option>
+              <option value="60000">Last 1m</option>
+              <option value="300000" selected>Last 5m</option>
+              <option value="900000">Last 15m</option>
+              <option value="3600000">Last 1h</option>
+              <option value="21600000">Last 6h</option>
+              <option value="86400000">Last 24h</option>
+              <option value="604800000">Last 7d</option>
+            </select>
+            <input id="timelineFrom" type="datetime-local" title="From">
+            <input id="timelineTo" type="datetime-local" title="To">
+            <button id="applyTimeline" type="button">Apply</button>
+            <button id="liveTimeline" type="button">Live</button>
+          </div>
+        </div>
         <div class="timeline">
-          <div class="chart-legend"><span><i class="bar-key"></i>records/sec</span><span><i class="line-key"></i>data/sec</span></div>
+          <div class="chart-legend"><span><i class="bar-key"></i>events/sec</span><span><i class="line-key"></i>input throughput</span></div>
           <div id="timelineBars" class="timeline-bars"></div>
           <svg id="spark"></svg>
-          <div class="axis-note">recent polling window</div>
-          <div id="timelineHint" class="axis-note mono"></div>
+          <div id="timelineAxis" class="timeline-axis"></div>
         </div>
       </div>
       <div class="panel span5"><h2>Decision Distribution</h2><div class="scroll"><table><thead><tr><th>Decision</th><th>Count</th><th>Share</th></tr></thead><tbody id="decisionDist"></tbody></table></div></div>
