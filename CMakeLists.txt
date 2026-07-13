@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.22)
 if(DEFINED ENV{VCPKG_ROOT} AND NOT CMAKE_TOOLCHAIN_FILE)
     set(CMAKE_TOOLCHAIN_FILE "$ENV{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake" CACHE PATH "")
 endif()
-project(blazerules VERSION 0.5.2 LANGUAGES CXX)
+project(blazerules VERSION 0.5.3 LANGUAGES CXX)
 include(CheckCXXCompilerFlag)
 include(CheckIPOSupported)
 
@@ -218,7 +218,7 @@ option(BLAZERULES_IO "Build streaming/IO connectors (Kafka, CDC, decoders)" ON)
 option(BLAZERULES_IO_KAFKA "Kafka source/sink via librdkafka (needs the io module)" ON)
 option(BLAZERULES_IO_AVRO "Avro binary decoder in blazerules_io" ON)
 option(BLAZERULES_IO_PROTOBUF "Protobuf dynamic descriptor decoder in blazerules_io" ON)
-option(BLAZERULES_IO_S3 "Compatibility flag; exact-object s3:// IO uses the AWS CLI cache path" ON)
+option(BLAZERULES_IO_S3 "Native Arrow S3 streaming with AWS CLI cache fallback" ON)
 if(BLAZERULES_IO)
         set(BLAZERULES_IO_SOURCES
                 src/io/cdc.cpp
@@ -374,6 +374,13 @@ if(BLAZERULES_TESTS)
         target_link_libraries(blazerules_tests PRIVATE blazerules_core GTest::gtest_main)
         include(GoogleTest)
         gtest_discover_tests(blazerules_tests)
+
+        if(BLAZERULES_IO)
+                add_executable(blazerules_io_tests tests/io_streaming_tests.cpp)
+                target_link_libraries(blazerules_io_tests
+                        PRIVATE blazerules_io GTest::gtest_main)
+                gtest_discover_tests(blazerules_io_tests)
+        endif()
 endif()
 
 install(TARGETS blazerules_core

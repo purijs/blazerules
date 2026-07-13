@@ -51,7 +51,7 @@ struct EngineConfig {
     TraceMode trace_mode = TRACE_NONE;
     double trace_sample_rate = 0.05;
 
-    enum OutputDetail { OUTPUT_DECISIONS, OUTPUT_BITMASKS };
+    enum OutputDetail { OUTPUT_COUNTS, OUTPUT_CODES, OUTPUT_DECISIONS, OUTPUT_BITMASKS };
     OutputDetail output_detail = OUTPUT_BITMASKS;
 
     size_t max_window_entities = 10000000;
@@ -220,6 +220,8 @@ public:
     BatchResult evaluate_message_views(const std::vector<std::string_view>& messages);
     BatchResult evaluate_ndjson(std::string_view ndjson_bytes);
     BatchResult evaluate_ndjson_padded(std::string_view ndjson_bytes);
+    BatchResult evaluate_json_array(std::string_view json_bytes);
+    BatchResult evaluate_json_array_padded(std::string_view json_bytes);
     BatchResult evaluate_record_batch(const std::shared_ptr<arrow::RecordBatch>& batch);
     BatchResult evaluate_batch(const std::shared_ptr<arrow::RecordBatch>& batch) {
         return evaluate_record_batch(batch);
@@ -228,6 +230,8 @@ public:
     void evaluate_message_views_into(const std::vector<std::string_view>& messages, BatchResult& out);
     void evaluate_ndjson_into(std::string_view ndjson_bytes, BatchResult& out);
     void evaluate_ndjson_padded_into(std::string_view ndjson_bytes, BatchResult& out);
+    void evaluate_json_array_into(std::string_view json_bytes, BatchResult& out);
+    void evaluate_json_array_padded_into(std::string_view json_bytes, BatchResult& out);
     void evaluate_record_batch_into(const std::shared_ptr<arrow::RecordBatch>& batch, BatchResult& out);
 
     std::vector<std::unique_ptr<RuleEngine>> create_shards(int shard_count) const;
@@ -305,6 +309,7 @@ private:
     void compile_pending_rules_after_bind();
     void ensure_schema_bound_from_messages(const std::vector<std::string_view>& messages);
     void ensure_schema_bound_from_ndjson(std::string_view ndjson_bytes);
+    void ensure_schema_bound_from_json_array(std::string_view json_bytes, bool padded);
     void ensure_schema_bound_from_arrow(const std::shared_ptr<arrow::RecordBatch>& batch);
     std::shared_ptr<arrow::RecordBatch> align_record_batch_to_schema(
         const std::shared_ptr<arrow::RecordBatch>& batch) const;

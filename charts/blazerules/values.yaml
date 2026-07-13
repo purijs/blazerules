@@ -2,7 +2,7 @@ image:
   repository: blazerules
   # Pin to an immutable tag rather than "latest" so deployments are reproducible and
   # cannot be silently changed by a registry push. Override per release.
-  tag: "0.5.2"
+  tag: "0.5.3"
   pullPolicy: IfNotPresent
 
 agent:

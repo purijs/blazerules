@@ -18,6 +18,7 @@ class BatchTransposer {
 public:
     explicit BatchTransposer(const BlazeRulesSchema& schema,
                              arrow::MemoryPool* pool = arrow::default_memory_pool());
+    ~BatchTransposer();
 
     void reset();
     void reserve(int rows);
@@ -26,6 +27,8 @@ public:
     void add_json_messages(const std::vector<std::string_view>& messages);
     void add_ndjson(std::string_view ndjson_bytes, int thread_count = 0);
     void add_ndjson_padded(std::string_view ndjson_bytes, int thread_count = 0);
+    void add_json_array(std::string_view json_bytes);
+    void add_json_array_padded(std::string_view json_bytes);
     void set_max_error_samples(int max_samples);
     void set_array_any_channels(std::vector<ArrayAnyChannelSpec> channels,
                                 LookupRegistry lookups = {});
@@ -37,6 +40,8 @@ public:
     std::shared_ptr<arrow::RecordBatch> finish();
 
 private:
+    struct WorkerPoolState;
+
     struct ColumnBuffer {
         ColumnType type = ColumnType::FLOAT64;
         int64_t length = 0;
@@ -72,13 +77,14 @@ private:
     void parse_ndjson_view(std::string_view ndjson_bytes);
     void parse_ndjson_lines_safe(std::string_view ndjson_bytes);
     void parse_ndjson_parallel(std::string_view ndjson_bytes, int thread_count);
+    void parse_json_array_view(std::string_view json_bytes);
     void record_error(std::string code, std::string message, std::string source,
                       int64_t row_index, std::string column_name, bool skip_record);
     void record_type_error(int col_index, int64_t row_index);
     void learn_field_order_from_ndjson(std::string_view ndjson_bytes);
     std::vector<std::pair<size_t, size_t>> split_ndjson(std::string_view ndjson_bytes,
                                                         int thread_count) const;
-    void merge_from(BatchTransposer& other);
+    void merge_workers_parallel(const std::vector<BatchTransposer*>& workers);
     std::shared_ptr<arrow::Array> finish_column(int col_index);
     std::shared_ptr<arrow::Array> finish_unprojected_column(int col_index) const;
 
@@ -114,6 +120,7 @@ private:
     std::string last_error_;
     absl::flat_hash_map<std::string, int> error_counts_;
     std::vector<BatchErrorSample> error_samples_;
+    std::unique_ptr<WorkerPoolState> worker_pool_;
 };
 
 #endif // BLAZERULES_TRANSPOSER_H

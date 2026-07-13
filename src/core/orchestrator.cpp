@@ -1290,9 +1290,21 @@ void evaluate_rules(const arrow::RecordBatch& batch,
                     const EvalOptions& options,
                     BatchResult& out) {
     int n = static_cast<int>(batch.num_rows());
+    out.n_records = n;
+    out.rule_set_version = rs.version;
+    out.decision_labels = rs.decision_labels;
+    out.rule_match_counts.clear();
+    out.rule_bitmasks.clear();
+    out.grouped_decision_indices.clear();
+    out.grouped_winning_rule_indices.clear();
+    out.matched_record_indices.clear();
+    out.decisions.clear();
+    out.decision_codes.clear();
+    out.scores.clear();
+    out.risk_bands.clear();
+    out.winning_rule_ids.clear();
+    out.n_matched = 0;
     if (n == 0 || rs.rules.empty()) {
-        out.n_records = n;
-        out.rule_set_version = rs.version;
         return;
     }
 
@@ -1336,48 +1348,68 @@ void evaluate_rules(const arrow::RecordBatch& batch,
     int bb = bitmask_bytes(n);
     int R = static_cast<int>(rs.rules.size());
 
-    std::vector<RuleReduce> reduce(R);
-    for (int r = 0; r < R; ++r) {
-        const auto& rule = rs.rules[r];
-        reduce[r].action_rank = rule.action_rank > 0
-            ? rule.action_rank
-            : action_rank(rule.action);
-        reduce[r].action_code = rule.action_code;
-        reduce[r].severity_rank = static_cast<int8_t>(severity_rank(rule.severity));
-        reduce[r].priority = rule.priority;
-        double contribution = rule.weight;
-        if (contribution == 0.0 && rule.action != ActionType::APPROVE) {
-            contribution = static_cast<double>((severity_rank(rule.severity) + 1) * 10);
-        }
-        reduce[r].contribution = contribution;
-        reduce[r].score_cap = rule.score_cap;
-        reduce[r].shadow = rule.shadow;
-    }
+    const bool reduce_decisions =
+        options.materialize_decision_codes ||
+        options.materialize_decision_strings ||
+        options.materialize_scores ||
+        options.materialize_risk_bands ||
+        options.materialize_winning_rules ||
+        options.materialize_grouped_indices;
+    const bool need_codes =
+        options.materialize_decision_codes ||
+        options.materialize_decision_strings ||
+        options.materialize_risk_bands ||
+        options.materialize_grouped_indices;
+    const bool need_scores =
+        options.materialize_scores ||
+        options.materialize_risk_bands;
+    const bool need_winning =
+        options.materialize_winning_rules ||
+        options.materialize_grouped_indices;
 
-    out.n_records = n;
-    out.rule_set_version = rs.version;
-    out.decision_labels = rs.decision_labels;
-    out.rule_match_counts.clear();
-    out.grouped_decision_indices.clear();
-    out.grouped_winning_rule_indices.clear();
-    out.matched_record_indices.clear();
-    out.scores.assign(n, 0.0);
     int default_code = 0;
     auto default_it = rs.decision_label_to_code.find(rs.default_decision);
     if (default_it != rs.decision_label_to_code.end()) default_code = default_it->second;
     std::string default_label = default_code >= 0 && default_code < static_cast<int>(rs.decision_labels.size())
         ? rs.decision_labels[static_cast<size_t>(default_code)]
         : std::string("APPROVE");
-    out.decisions.assign(n, default_label);
-    out.decision_codes.assign(n, default_code);
-    out.risk_bands.assign(n, "LOW");
-    out.winning_rule_ids.assign(n, "");
-    std::vector<int32_t> best_action(n, default_code >= 0 && default_code < static_cast<int>(rs.decision_ranks.size())
-        ? rs.decision_ranks[static_cast<size_t>(default_code)]
-        : 0);
-    std::vector<int8_t> best_severity(n, -1);
-    std::vector<int32_t> best_priority(n, std::numeric_limits<int>::min());
-    std::vector<int32_t> winning_idx(n, -1);
+
+    std::vector<RuleReduce> reduce;
+    std::vector<int32_t> best_action;
+    std::vector<int8_t> best_severity;
+    std::vector<int32_t> best_priority;
+    std::vector<int32_t> winning_idx;
+    if (reduce_decisions) {
+        reduce.resize(static_cast<size_t>(R));
+        for (int r = 0; r < R; ++r) {
+            const auto& rule = rs.rules[r];
+            reduce[r].action_rank = rule.action_rank > 0
+                ? rule.action_rank
+                : action_rank(rule.action);
+            reduce[r].action_code = rule.action_code;
+            reduce[r].severity_rank = static_cast<int8_t>(severity_rank(rule.severity));
+            reduce[r].priority = rule.priority;
+            double contribution = rule.weight;
+            if (contribution == 0.0 && rule.action != ActionType::APPROVE) {
+                contribution = static_cast<double>((severity_rank(rule.severity) + 1) * 10);
+            }
+            reduce[r].contribution = contribution;
+            reduce[r].score_cap = rule.score_cap;
+            reduce[r].shadow = rule.shadow;
+        }
+        if (need_scores) out.scores.assign(n, 0.0);
+        if (options.materialize_decision_strings) out.decisions.assign(n, default_label);
+        if (need_codes) out.decision_codes.assign(n, default_code);
+        if (options.materialize_risk_bands) out.risk_bands.assign(n, "LOW");
+        if (options.materialize_winning_rules) out.winning_rule_ids.assign(n, "");
+        best_action.assign(static_cast<size_t>(n),
+            default_code >= 0 && default_code < static_cast<int>(rs.decision_ranks.size())
+                ? rs.decision_ranks[static_cast<size_t>(default_code)]
+                : 0);
+        best_severity.assign(static_cast<size_t>(n), -1);
+        best_priority.assign(static_cast<size_t>(n), std::numeric_limits<int>::min());
+        if (need_winning) winning_idx.assign(static_cast<size_t>(n), -1);
+    }
     std::vector<uint8_t> uni(static_cast<size_t>(bb), 0);
 
     const bool materialize = options.materialize_rule_bitmasks;
@@ -1449,7 +1481,8 @@ void evaluate_rules(const arrow::RecordBatch& batch,
             counts[r] += blazerules::count_set_bits(final_mask, mb);
             blazerules::or_into(uni_morsel, final_mask, mb);
 
-            const RuleReduce& rr = reduce[r];
+            if (!reduce_decisions) continue;
+            const RuleReduce& rr = reduce[static_cast<size_t>(r)];
             if (rr.shadow) continue;
             for (int b = 0; b < mb; ++b) {
                 uint8_t byte = final_mask[b];
@@ -1458,19 +1491,21 @@ void evaluate_rules(const arrow::RecordBatch& batch,
                     int j = b * 8 + bit;
                     if (j >= m) break;
                     int row = r0 + j;
-                    double s = out.scores[row] + rr.contribution;
-                    if (rr.score_cap > 0.0 && s > rr.score_cap) s = rr.score_cap;
-                    out.scores[row] = s;
+                    if (need_scores) {
+                        double s = out.scores[static_cast<size_t>(row)] + rr.contribution;
+                        if (rr.score_cap > 0.0 && s > rr.score_cap) s = rr.score_cap;
+                        out.scores[static_cast<size_t>(row)] = s;
+                    }
                     bool wins = rr.action_rank > best_action[row] ||
                         (rr.action_rank == best_action[row] && rr.severity_rank > best_severity[row]) ||
                         (rr.action_rank == best_action[row] && rr.severity_rank == best_severity[row] &&
                          rr.priority > best_priority[row]);
                     if (wins) {
                         best_action[row] = rr.action_rank;
-                        out.decision_codes[row] = rr.action_code;
+                        if (need_codes) out.decision_codes[static_cast<size_t>(row)] = rr.action_code;
                         best_severity[row] = rr.severity_rank;
                         best_priority[row] = rr.priority;
-                        winning_idx[row] = r;
+                        if (need_winning) winning_idx[static_cast<size_t>(row)] = r;
                     }
                     byte &= byte - 1;
                 }
@@ -1497,21 +1532,37 @@ void evaluate_rules(const arrow::RecordBatch& batch,
         out.rule_match_counts[rs.rules[r].rule_id] = static_cast<int>(total_counts[r]);
     }
     out.n_matched = blazerules::count_set_bits(uni.data(), bb);
-    blazerules::find_set_bits(uni.data(), n, out.matched_record_indices);
-    for (int i = 0; i < n; ++i) {
-        int code = out.decision_codes[i];
-        if (code >= 0 && code < static_cast<int>(rs.decision_labels.size())) {
-            out.decisions[i] = rs.decision_labels[static_cast<size_t>(code)];
+    if (options.materialize_matched_indices) {
+        blazerules::find_set_bits(uni.data(), n, out.matched_record_indices);
+    }
+    if (reduce_decisions) {
+        for (int i = 0; i < n; ++i) {
+            int code = need_codes ? out.decision_codes[static_cast<size_t>(i)] : default_code;
+            std::string label = default_label;
+            if (code >= 0 && code < static_cast<int>(rs.decision_labels.size())) {
+                label = rs.decision_labels[static_cast<size_t>(code)];
+            }
+            if (options.materialize_decision_strings) {
+                out.decisions[static_cast<size_t>(i)] = label;
+            }
+            std::string winning_rule;
+            if (need_winning && winning_idx[static_cast<size_t>(i)] >= 0) {
+                winning_rule = rs.rules[static_cast<size_t>(winning_idx[static_cast<size_t>(i)])].rule_id;
+                if (options.materialize_winning_rules) {
+                    out.winning_rule_ids[static_cast<size_t>(i)] = winning_rule;
+                }
+            }
+            if (options.materialize_grouped_indices) {
+                out.grouped_decision_indices[label].push_back(i);
+                if (!winning_rule.empty()) {
+                    out.grouped_winning_rule_indices[winning_rule].push_back(i);
+                }
+            }
+            if (options.materialize_risk_bands) {
+                const double score = need_scores ? out.scores[static_cast<size_t>(i)] : 0.0;
+                out.risk_bands[static_cast<size_t>(i)] = risk_band_for(score, label);
+            }
         }
-        if (winning_idx[i] >= 0) {
-            const auto& rule = rs.rules[winning_idx[i]];
-            out.winning_rule_ids[i] = rule.rule_id;
-        }
-        out.grouped_decision_indices[out.decisions[i]].push_back(i);
-        if (!out.winning_rule_ids[i].empty()) {
-            out.grouped_winning_rule_indices[out.winning_rule_ids[i]].push_back(i);
-        }
-        out.risk_bands[i] = risk_band_for(out.scores[i], out.decisions[i]);
     }
     out.timing.result_assemble_us = std::chrono::duration_cast<std::chrono::microseconds>(
         std::chrono::steady_clock::now() - assemble_start).count();

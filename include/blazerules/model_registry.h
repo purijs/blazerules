@@ -17,6 +17,7 @@ class ModelRegistry {
 public:
     void register_model(const std::string& name, const std::string& path);
     void set_intra_op_threads(int threads);
+    void share_models_from(const ModelRegistry& other);
 
     bool contains(const std::string& name) const;
     int size() const;

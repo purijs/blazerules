@@ -12,7 +12,6 @@
 #include <string_view>
 #include <vector>
 
-#include <simdjson.h>
 #include <yaml-cpp/yaml.h>
 
 #include <arrow/api.h>
@@ -174,27 +173,11 @@ std::string json_escape(std::string_view value) {
     return out;
 }
 
-std::string trim_left(std::string_view value) {
-    size_t i = 0;
-    while (i < value.size() && std::isspace(static_cast<unsigned char>(value[i]))) ++i;
-    return std::string(value.substr(i));
-}
-
-std::string json_array_to_ndjson(std::string_view bytes) {
-    std::string trimmed = trim_left(bytes);
-    if (trimmed.empty() || trimmed.front() != '[') {
-        return std::string(bytes);
+bool looks_like_json_array(std::string_view value) {
+    for (char ch : value) {
+        if (!std::isspace(static_cast<unsigned char>(ch))) return ch == '[';
     }
-    simdjson::dom::parser parser;
-    simdjson::dom::element doc;
-    if (parser.parse(trimmed).get(doc) || doc.type() != simdjson::dom::element_type::ARRAY) {
-        throw CliError("json-array input must be a top-level JSON array");
-    }
-    std::ostringstream out;
-    for (simdjson::dom::element row : doc.get_array()) {
-        out << row << '\n';
-    }
-    return out.str();
+    return false;
 }
 
 void apply_aws_options(const Options& opts) {
@@ -325,9 +308,11 @@ EngineConfig make_engine_config(const Options& opts) {
     config.decision_log_path = get(opts, "decision-log");
     config.max_error_samples = get_int(opts, "max-error-samples", config.max_error_samples);
     config.simd_backend_override = get(opts, "simd-backend", config.simd_backend_override);
-    config.output_detail = lower_copy(get(opts, "output-detail", "decisions")) == "bitmasks"
-        ? EngineConfig::OUTPUT_BITMASKS
-        : EngineConfig::OUTPUT_DECISIONS;
+    const std::string detail = lower_copy(get(opts, "output-detail", "decisions"));
+    if (detail == "counts") config.output_detail = EngineConfig::OUTPUT_COUNTS;
+    else if (detail == "codes") config.output_detail = EngineConfig::OUTPUT_CODES;
+    else if (detail == "bitmasks") config.output_detail = EngineConfig::OUTPUT_BITMASKS;
+    else config.output_detail = EngineConfig::OUTPUT_DECISIONS;
 
     const std::string ingest = lower_copy(get(opts, "ingest-error-mode"));
     if (ingest == "hard_fail") config.ingest_error_mode = EngineConfig::HARD_FAIL;
@@ -609,11 +594,52 @@ EvalTotals evaluate_batches(RuleEngine& engine,
     return totals;
 }
 
+void evaluate_batch_into(RuleEngine& engine,
+                         const std::shared_ptr<arrow::RecordBatch>& batch,
+                         const std::string& output,
+                         std::ostream& out,
+                         EvalTotals& totals,
+                         int32_t& row_offset,
+                         int& batch_index) {
+    BatchResult result = engine.evaluate_batch(batch);
+    if (output == "decisions-jsonl") write_decisions_jsonl(result, row_offset, out);
+    if (output == "bitmasks") write_bitmasks(result, batch_index, out);
+    add_result(totals, result, row_offset);
+    row_offset += result.n_records;
+    ++batch_index;
+}
+
+void evaluate_ndjson_into(RuleEngine& engine,
+                          std::string_view bytes,
+                          const std::string& output,
+                          std::ostream& out,
+                          EvalTotals& totals,
+                          int32_t& row_offset,
+                          int& batch_index) {
+    BatchResult result = engine.evaluate_ndjson_padded(bytes);
+    if (output == "decisions-jsonl") write_decisions_jsonl(result, row_offset, out);
+    if (output == "bitmasks") write_bitmasks(result, batch_index, out);
+    add_result(totals, result, row_offset);
+    row_offset += result.n_records;
+    ++batch_index;
+}
+
 EvalTotals evaluate_ndjson(RuleEngine& engine, std::string_view bytes,
                            const std::string& output, std::ostream& out) {
     EvalTotals totals;
     totals.collect_rows = (output == "arrow-ipc");
     BatchResult result = engine.evaluate_ndjson_padded(bytes);
+    if (output == "decisions-jsonl") write_decisions_jsonl(result, 0, out);
+    if (output == "bitmasks") write_bitmasks(result, 0, out);
+    add_result(totals, result, 0);
+    return totals;
+}
+
+EvalTotals evaluate_json_array(RuleEngine& engine, std::string_view bytes,
+                               const std::string& output, std::ostream& out) {
+    EvalTotals totals;
+    totals.collect_rows = (output == "arrow-ipc");
+    BatchResult result = engine.evaluate_json_array(bytes);
     if (output == "decisions-jsonl") write_decisions_jsonl(result, 0, out);
     if (output == "bitmasks") write_bitmasks(result, 0, out);
     add_result(totals, result, 0);
@@ -667,7 +693,7 @@ int command_eval(Options opts) {
             << "Inputs:\n"
             << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv, avro, protobuf, auto\n\n"
             << "Output modes:\n"
-            << "  summary, decisions-jsonl, grouped-decisions, rule-counts, bitmasks, arrow-ipc\n\n"
+            << "  none, summary, decisions-jsonl, grouped-decisions, rule-counts, bitmasks, arrow-ipc\n\n"
             << "Format-specific flags:\n"
             << "  --schema PATH                 Avro schema JSON\n"
             << "  --descriptor PATH             Protobuf FileDescriptorSet\n"
@@ -676,7 +702,7 @@ int command_eval(Options opts) {
             << "Runtime flags:\n"
             << "  --config PATH                 Load a unified run config (flags override it)\n"
             << "  --batch-size N --threads N --model name=PATH --output-path PATH\n"
-            << "  --output-detail decisions|bitmasks --ingest-error-mode M --type-mismatch-mode M\n"
+            << "  --output-detail counts|codes|decisions|bitmasks --ingest-error-mode M --type-mismatch-mode M\n"
             << "  --decision-log PATH --dead-letter-log PATH --simd-backend auto|scalar|neon|avx2|avx512\n";
         return 0;
     }
@@ -685,6 +711,10 @@ int command_eval(Options opts) {
     EngineConfig config = make_engine_config(opts);
     const std::string output =
         lower_copy(get(opts, "output", has(opts, "output-path") ? "decisions-jsonl" : "summary"));
+    if (!has(opts, "output-detail") &&
+        (output == "none" || output == "summary" || output == "rule-counts")) {
+        config.output_detail = EngineConfig::OUTPUT_COUNTS;
+    }
     if (output == "bitmasks") config.output_detail = EngineConfig::OUTPUT_BITMASKS;
     RuleEngine engine(config);
     register_models(engine, opts);
@@ -692,7 +722,7 @@ int command_eval(Options opts) {
 
     std::ofstream out_file;
     std::ostringstream discard;
-    std::ostream& out = (output == "arrow-ipc") ? discard : output_stream(opts, out_file);
+    std::ostream& out = (output == "arrow-ipc" || output == "none") ? discard : output_stream(opts, out_file);
 
     const std::string input = lower_copy(get(opts, "input", get(opts, "format", "auto")));
     const std::string path = get(opts, "path");
@@ -701,15 +731,30 @@ int command_eval(Options opts) {
     EvalTotals totals;
     if (opts.use_stdin) {
         std::string bytes = read_stdin_bytes();
-        std::string ndjson = (input == "json-array") ? json_array_to_ndjson(bytes) : bytes;
-        totals = evaluate_ndjson(engine, ndjson, output, out);
+        if (input == "json-array" || (input == "json" && looks_like_json_array(bytes))) {
+            totals = evaluate_json_array(engine, bytes, output, out);
+        } else {
+            totals = evaluate_ndjson(engine, bytes, output, out);
+        }
     } else if (input == "ndjson" || input == "jsonl") {
-        std::string bytes = blazerules_io::read_ndjson_bytes(path);
-        totals = evaluate_ndjson(engine, bytes, output, out);
+        totals.collect_rows = (output == "arrow-ipc");
+        int32_t row_offset = 0;
+        int batch_index = 0;
+        blazerules_io::FileReadOptions read_options;
+        read_options.batch_size = config.batch_size;
+        read_options.ndjson_chunk_bytes = std::max<int64_t>(
+            1 << 20, static_cast<int64_t>(config.batch_size) * 1024);
+        blazerules_io::for_each_ndjson_chunk(path, [&](std::string_view chunk) {
+            evaluate_ndjson_into(engine, chunk, output, out, totals, row_offset, batch_index);
+            return true;
+        }, read_options);
     } else if (input == "json" || input == "json-array") {
         std::string bytes = blazerules_io::read_ndjson_bytes(path);
-        std::string ndjson = json_array_to_ndjson(bytes);
-        totals = evaluate_ndjson(engine, ndjson, output, out);
+        if (input == "json-array" || looks_like_json_array(bytes)) {
+            totals = evaluate_json_array(engine, bytes, output, out);
+        } else {
+            totals = evaluate_ndjson(engine, bytes, output, out);
+        }
     } else if (input == "debezium") {
         std::string bytes = blazerules_io::read_ndjson_bytes(path);
         std::vector<std::string> lines;
@@ -726,8 +771,16 @@ int command_eval(Options opts) {
     } else if (input == "arrow-ipc" || input == "arrow" || input == "parquet" ||
                input == "csv" || input == "auto") {
         const auto format = blazerules_io::parse_file_format(input == "arrow" ? "arrow-ipc" : input);
-        auto batches = blazerules_io::read_record_batches(path, format, config.batch_size);
-        totals = evaluate_batches(engine, batches, output, out);
+        totals.collect_rows = (output == "arrow-ipc");
+        int32_t row_offset = 0;
+        int batch_index = 0;
+        blazerules_io::FileReadOptions read_options;
+        read_options.batch_size = config.batch_size;
+        read_options.arrow_validation = blazerules_io::ArrowIpcValidationLevel::STRUCTURAL;
+        blazerules_io::for_each_record_batch(path, format, [&](const auto& batch) {
+            evaluate_batch_into(engine, batch, output, out, totals, row_offset, batch_index);
+            return true;
+        }, read_options);
     } else if (input == "avro") {
 #ifdef BLAZERULES_IO_AVRO
         const std::string schema_path = get(opts, "schema");
@@ -847,7 +900,9 @@ int command_stream_kafka(Options opts) {
             << "  json, ndjson, debezium, arrow-ipc, avro, protobuf\n\n"
             << "Kafka flags:\n"
             << "  --group-id ID --output-topic TOPIC --dlq-topic TOPIC --batch-size N\n"
+            << "  --workers N --queue-depth N --output-mode rows|grouped|none\n"
             << "  --max-messages N --max-batches N --poll-timeout-ms N --flush-timeout-ms N\n"
+            << "  --flush-interval-ms N --partition-affine true|false\n"
             << "  --commit-offsets true|false --model name=PATH --config PATH\n"
             << "  --consumer-conf k=v            librdkafka consumer setting, repeatable (e.g. SASL/SSL)\n"
             << "  --producer-conf k=v            librdkafka producer setting, repeatable\n\n"
@@ -855,11 +910,17 @@ int command_stream_kafka(Options opts) {
             << "  --schema PATH                 Avro schema JSON\n"
             << "  --descriptor PATH             Protobuf FileDescriptorSet\n"
             << "  --message TYPE                Protobuf message type\n"
+            << "  --arrow-validation LEVEL      full, structural, or trusted\n"
             << "  --op-field FIELD              Debezium operation field, default __op\n";
         return 0;
     }
     maybe_load_config(opts);
     apply_aws_options(opts);
+    const std::string output_mode = lower_copy(get(opts, "output-mode", "rows"));
+    if (!has(opts, "output-detail")) {
+        opts.values["output-detail"] = output_mode == "none" ? "counts" :
+            (output_mode == "grouped" ? "codes" : "decisions");
+    }
     RuleEngine engine(make_engine_config(opts));
     register_models(engine, opts);
     load_rules(engine, opts);
@@ -873,12 +934,27 @@ int command_stream_kafka(Options opts) {
     config.consumer_conf = parse_kv_list(opts.consumer_conf, "--consumer-conf");
     config.producer_conf = parse_kv_list(opts.producer_conf, "--producer-conf");
     config.batch_size = get_int(opts, "batch-size", config.batch_size);
+    config.worker_count = get_int(opts, "workers", config.worker_count);
+    config.queue_depth = get_int(opts, "queue-depth", config.queue_depth);
     config.poll_timeout_ms = get_int(opts, "poll-timeout-ms", config.poll_timeout_ms);
     config.flush_timeout_ms = get_int(opts, "flush-timeout-ms", config.flush_timeout_ms);
+    config.flush_interval_ms = get_int(opts, "flush-interval-ms", config.flush_interval_ms);
     config.max_messages = get_i64(opts, "max-messages", config.max_messages);
     config.max_batches = get_i64(opts, "max-batches", config.max_batches);
     config.commit_offsets = truthy(opts, "commit-offsets", config.commit_offsets);
+    config.partition_affine = truthy(opts, "partition-affine", config.partition_affine);
+    config.output_mode = output_mode;
     config.payload_format = lower_copy(get(opts, "format", "json"));
+    const std::string validation = lower_copy(get(opts, "arrow-validation", "structural"));
+    if (validation == "full") {
+        config.arrow_validation = blazerules_io::ArrowIpcValidationLevel::FULL;
+    } else if (validation == "trusted") {
+        config.arrow_validation = blazerules_io::ArrowIpcValidationLevel::TRUSTED;
+    } else if (validation == "structural") {
+        config.arrow_validation = blazerules_io::ArrowIpcValidationLevel::STRUCTURAL;
+    } else {
+        throw CliError("--arrow-validation must be full, structural, or trusted");
+    }
     config.debezium_op_field = get(opts, "op-field", config.debezium_op_field);
     if (has(opts, "schema")) config.avro_schema_json = read_file_bytes(get(opts, "schema"));
     if (has(opts, "descriptor")) {
@@ -926,9 +1002,14 @@ void print_help() {
         << "  --aws-endpoint-url URL       Custom S3 endpoint\n";
 }
 
+struct FilesystemFinalizer {
+    ~FilesystemFinalizer() { blazerules_io::finalize_filesystems(); }
+};
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    FilesystemFinalizer filesystem_finalizer;
     try {
         if (argc < 2 || std::string(argv[1]) == "--help" || std::string(argv[1]) == "-h") {
             print_help();

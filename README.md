@@ -85,12 +85,17 @@ blazerules stream kafka \
   --format protobuf \
   --descriptor transaction.desc \
   --message payments.Transaction \
+  --workers 4 \
+  --queue-depth 64 \
+  --output-mode grouped \
   --consumer-conf security.protocol=SASL_SSL
 ```
 
 Supported `eval` inputs are `ndjson`, `jsonl`, `json`, `json-array`, `debezium`,
-`arrow-ipc`, `arrow`, `parquet`, `csv`, `avro`, `protobuf`, and `auto`. Output
-modes are `summary`, `decisions-jsonl`, `grouped-decisions`, `rule-counts`,
+`arrow-ipc`, `arrow`, `parquet`, `csv`, `avro`, `protobuf`, and `auto`.
+Top-level JSON arrays use the direct JSON-array evaluator; they do not get
+minified into NDJSON first. Output
+modes are `none`, `summary`, `decisions-jsonl`, `grouped-decisions`, `rule-counts`,
 `bitmasks`, and `arrow-ipc` (a binary Arrow stream of per-row decisions that
 mirrors the in-memory `BatchResult` a Python caller reads). Python-only in-memory
 objects such as `pyarrow.RecordBatch` map to CLI file/stdin equivalents such as
@@ -125,6 +130,7 @@ on-the-wire equivalents of an in-memory `pyarrow.RecordBatch`).
 | Input | How to use it | Typical use |
 | --- | --- | --- |
 | JSON / NDJSON bytes | `RuleEngine.evaluate_ndjson(...)` or `blazerules eval --input ndjson` | API payloads, application events, log lines already formatted as JSON. |
+| Top-level JSON arrays | `RuleEngine.evaluate_json_array(...)` or `blazerules eval --input json-array` | Batch APIs that send one JSON array per request/file. |
 | Python lists of JSON strings | `RuleEngine.evaluate_messages(...)` | Small integrations and local scripts. |
 | PyArrow / Arrow batches | `RuleEngine.evaluate_batch(...)` or `blazerules eval --input arrow-ipc\|parquet\|csv` | Typed pipelines, Parquet/Arrow data, high-throughput paths. |
 | Kafka | `blazerules stream kafka`, `blazerules_io.KafkaConsumer`, or `run_stream(...)` | Microbatch JSON, Arrow IPC, Avro, Protobuf, or Debezium consume → evaluate → produce decisions. |
@@ -176,7 +182,11 @@ blazerules_agent \
   --host 127.0.0.1 \
   --port 9480 \
   --batch-size 4096 \
+  --http-threads 8 \
+  --eval-shards 4 \
+  --sink-workers 2 \
   --flush-ms 50 \
+  --ack-mode durable \
   --output ndjson \
   --output-path decisions.ndjson
 
@@ -205,6 +215,13 @@ blazerules_agent \
 Each agent input batches records by `batch_size` or `flush_ms`, evaluates the
 batch, and writes compact decision events. Bad records can be counted, skipped,
 or written to a dead-letter NDJSON file depending on ingest settings.
+
+HTTP request, evaluation, and sink queues are bounded independently. Increase
+`--http-queue-depth`, `--eval-queue-depth`, or `--sink-queue-depth` only after
+measuring the corresponding stage. `--ack-mode durable` responds after output
+is written; `evaluated` responds after evaluation while a bounded sink queue
+finishes the write. Stateless rulesets may use multiple `--eval-shards`;
+stateful rulesets remain ordered.
 
 `--output` accepts `stdout`, `ndjson`, or `arrow`. Use `--output arrow` with an
 `--output-path` to write decisions as a compact binary Arrow IPC stream instead
@@ -685,17 +702,34 @@ error_counts
 error_samples
 ```
 
-### Output detail: `DECISIONS` vs `BITMASKS`
+### Output detail: `COUNTS`, `CODES`, `DECISIONS`, and `BITMASKS`
 
 `EngineConfig.output_detail` decides how much per-record detail is materialized.
-**The build default is `OutputDetail.BITMASKS`.** Both modes give you the full
-routing output above (decisions, scores, risk bands, winning rules, `match_counts`,
-and every `indices_for_*` helper). `BITMASKS` additionally materializes a per-rule,
-per-record match mask, so you can ask *which* rules fired on *which* records —
-at the cost of one `⌈n/8⌉`-byte buffer per rule.
+**The build default is `OutputDetail.BITMASKS`.** Use the cheapest level that
+your caller needs:
+
+| Detail | Materialized outputs |
+| --- | --- |
+| `COUNTS` | `n_records`, `n_matched`, `match_counts`, ingest counters, timing. No row-level decisions. |
+| `CODES` | `COUNTS` plus compact integer `decision_codes` and `decision_label_map`. |
+| `DECISIONS` | Per-record decision strings, scores, risk bands, winning rules, grouped routing indices, and model outputs. |
+| `BITMASKS` | `DECISIONS` plus one per-rule, per-record match mask, so you can ask *which* rules fired on *which* records. |
 
 ```python
 config = blazerules.EngineConfig()
+
+# Aggregate-only (fastest result construction): skip row-level outputs.
+config.output_detail = blazerules.OutputDetail.COUNTS
+engine = blazerules.RuleEngine(config)
+result = engine.evaluate_ndjson(payload)
+result.n_records, result.n_matched, result.match_counts
+
+# Compact routing codes: no Python decision strings.
+config.output_detail = blazerules.OutputDetail.CODES
+engine = blazerules.RuleEngine(config)
+result = engine.evaluate_ndjson(payload)
+labels = result.decision_label_map
+labels[int(result.decision_codes[0])]
 
 # Routing-only (lighter): skip per-rule masks.
 config.output_detail = blazerules.OutputDetail.DECISIONS
@@ -712,8 +746,9 @@ result["velocity_rule"]                # np.ndarray[bool]; KeyError under DECISI
 result.indices_for_rule("velocity_rule")
 ```
 
-Set `OutputDetail.DECISIONS` for routing-only workloads to avoid the per-rule
-bitmask allocation; use `BITMASKS` when you need per-rule attribution. See
+Set `OutputDetail.COUNTS` for ingest/evaluate benchmarks, `CODES` for compact
+high-throughput routing, `DECISIONS` when you need normal row-level outputs, and
+`BITMASKS` when you need per-rule attribution. See
 [Decisions &amp; Scoring](https://blazerules.readme.io/docs/decisions-and-scoring)
 for the full breakdown.
 
@@ -804,10 +839,23 @@ Binary decoders produce Arrow `RecordBatch` objects and call `evaluate_batch`;
 they do not need to convert through JSON. The same decoder path is available
 through Python and the native `blazerules` CLI.
 
+`ArrowIpcDecoder.decode_each(...)` visits IPC batches without combining them.
+`blazerules_io.for_each_record_batch(...)` streams Arrow IPC, Parquet, CSV, or
+JSON batches from local files and exact S3 objects. Kafka `run_stream(...)`
+pipelines polling, partition-affine decode/evaluation, output delivery, and
+contiguous offset commits through bounded queues; use `output_mode="none"` for
+ingest/evaluate measurement or `"grouped"` for compact decision delivery.
+
 ## S3 Resources
 
-Rules, lookup CSVs, ONNX models, and files can be loaded from exact-object
-`s3://bucket/key` URIs through the AWS CLI cache path.
+Rules, lookup CSVs, and ONNX models can be resolved from exact-object
+`s3://bucket/key` URIs. Data files use native Arrow S3 streams when S3 support
+is compiled in, with the AWS CLI cache resolver retained as a compatibility
+fallback. Arrow IPC and Parquet are evaluated batch by batch; NDJSON is read in
+bounded chunks without downloading the complete object first.
+The CLI and Python module finalize the native S3 runtime automatically. C++
+embedders should call `blazerules_io::finalize_filesystems()` after all S3
+readers have stopped.
 
 ```python
 import blazerules
@@ -862,12 +910,13 @@ is visible in the agent log rather than silently producing an empty decision log
 - Use Release builds.
 - Batch records; do not call the engine per record.
 - Prefer Arrow when upstream data is already typed.
-- Use `evaluate_ndjson(bytes_blob)` for JSON streams.
+- Use `evaluate_ndjson(bytes_blob)` for NDJSON/JSONL streams.
+- Use `evaluate_json_array(bytes_blob)` for a top-level JSON array batch.
 - Use `evaluate_ndjson_padded(payload, logical_size)` or `evaluate_ndjson_file(...)` when input is
   already simdjson-padded or memory-mapped.
 - Keep streaming batches sized for latency, commonly 2K-64K rows.
 - Use larger batches for throughput benchmarks.
-- Use `OutputDetail.DECISIONS` unless per-rule masks are required.
+- Use `OutputDetail.COUNTS` or `CODES` for adapter benchmarks and compact routing; use `DECISIONS` for normal row-level outputs and `BITMASKS` only when per-rule masks are required.
 - Keep partition/entity affinity for window-heavy streaming workloads.
 - For a stateless ruleset under the agent, `blazerules_agent --eval-shards N`
   spreads evaluation across N cloned engines; it auto-downgrades to a single

@@ -28,6 +28,12 @@ BlazeRulesResult<BlazeRulesSchema> infer_schema_from_ndjson(
     std::string_view ndjson,
     const SchemaInferenceOptions& options = {});
 
+BlazeRulesResult<BlazeRulesSchema> infer_schema_from_json_array(
+    const RuleFileSpec& rules,
+    std::string_view json_array,
+    bool padded,
+    const SchemaInferenceOptions& options = {});
+
 BlazeRulesResult<BlazeRulesSchema> infer_schema_from_arrow(
     const RuleFileSpec& rules,
     const std::shared_ptr<arrow::RecordBatch>& batch,

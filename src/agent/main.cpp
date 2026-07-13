@@ -9,6 +9,7 @@
 #include <deque>
 #include <filesystem>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -29,6 +30,7 @@
 #include <arrow/ipc/writer.h>
 #include <arrow/util/compression.h>
 #include <httplib.h>
+#include <simdjson.h>
 #include <yaml-cpp/yaml.h>
 
 #include "blazerules/engine.h"
@@ -40,6 +42,42 @@ namespace fs = std::filesystem;
 namespace {
 
 std::atomic<bool> g_stop{false};
+
+template <typename T>
+class BoundedQueue {
+public:
+    explicit BoundedQueue(size_t capacity) : capacity_(std::max<size_t>(1, capacity)) {}
+
+    bool try_push(T value) {
+        std::lock_guard<std::mutex> lock(mu_);
+        if (closed_ || values_.size() >= capacity_) return false;
+        values_.push_back(std::move(value));
+        cv_.notify_one();
+        return true;
+    }
+
+    bool pop(T& value) {
+        std::unique_lock<std::mutex> lock(mu_);
+        cv_.wait(lock, [&] { return closed_ || !values_.empty(); });
+        if (values_.empty()) return false;
+        value = std::move(values_.front());
+        values_.pop_front();
+        return true;
+    }
+
+    void close() {
+        std::lock_guard<std::mutex> lock(mu_);
+        closed_ = true;
+        cv_.notify_all();
+    }
+
+private:
+    size_t capacity_;
+    std::mutex mu_;
+    std::condition_variable cv_;
+    std::deque<T> values_;
+    bool closed_ = false;
+};
 
 int64_t now_ms() {
     using namespace std::chrono;
@@ -251,6 +289,13 @@ struct InstanceConfig {
     int eval_shards = 1;
     int s3_roll_mb = 64;
     int s3_flush_seconds = 10;
+    int http_threads = std::max(4u, std::thread::hardware_concurrency());
+    int http_queue_depth = 256;
+    int eval_queue_depth = 64;
+    int sink_queue_depth = 64;
+    int sink_workers = 1;
+    int64_t max_request_bytes = 256LL * 1024 * 1024;
+    std::string ack_mode = "durable";
     std::string service = "unknown";
     std::string source = "log";
     InputConfig input;
@@ -306,7 +351,6 @@ class InstanceRunner {
 public:
     explicit InstanceRunner(InstanceConfig config)
         : config_(std::move(config)), engine_(make_engine_config(config_)), dedupe_(config_.dedupe) {
-        engine_.enable_metrics();
         register_models();
         if (!config_.rules.empty()) {
             engine_.load_rules(config_.rules);
@@ -369,6 +413,31 @@ public:
     }
 
 private:
+    struct HttpOutcome {
+        int status = 200;
+        std::string error;
+    };
+
+    struct HttpTask {
+        std::string content_type;
+        std::string body;
+        size_t payload_size = 0;
+        std::promise<HttpOutcome> completion;
+        std::atomic<bool> completed{false};
+    };
+
+    struct SinkTask {
+        std::shared_ptr<HttpTask> request;
+        std::vector<BatchResult> results;
+    };
+
+    static void complete_http(const std::shared_ptr<HttpTask>& task, HttpOutcome outcome) {
+        bool expected = false;
+        if (task && task->completed.compare_exchange_strong(expected, true)) {
+            task->completion.set_value(std::move(outcome));
+        }
+    }
+
     void build_model_columns(const BatchResult& result) {
         if (!model_columns_.empty() || result.model_outputs.empty()) return;
         std::unordered_map<std::string, int> seen;
@@ -555,7 +624,10 @@ private:
 
     static EngineConfig make_engine_config(const InstanceConfig& config) {
         EngineConfig engine_config;
-        engine_config.output_detail = EngineConfig::OUTPUT_DECISIONS;
+        engine_config.output_detail =
+            (config.output.type == "none" || config.output.type == "disabled")
+                ? EngineConfig::OUTPUT_COUNTS
+                : EngineConfig::OUTPUT_DECISIONS;
         if (!config.output.dead_letter_path.empty()) {
             engine_config.dead_letter_path = config.output.dead_letter_path;
             engine_config.ingest_error_mode = EngineConfig::SKIP_TO_DEAD_LETTER;
@@ -607,7 +679,6 @@ private:
             shard_engines_ = engine_.create_shards(config_.eval_shards - 1);
             std::vector<RuleEngine*> pool;
             for (auto& shard : shard_engines_) {
-                shard->enable_metrics();
                 register_models_on(*shard);
                 pool.push_back(shard.get());
             }
@@ -633,6 +704,11 @@ private:
         free_engines_.pop_back();
         pooled = true;
         return e;
+    }
+
+    bool pool_is_built() {
+        std::lock_guard<std::mutex> lock(pool_mu_);
+        return pool_built_;
     }
 
     // Only engines actually taken from the pool are returned to it, so an engine
@@ -704,6 +780,14 @@ private:
         if (out) out << stats;
     }
 
+    void stats_loop() {
+        while (!http_workers_stop_.load(std::memory_order_relaxed)) {
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+            write_input_stats();
+        }
+        write_input_stats(true);
+    }
+
     // Surface evaluation failures (bad rules/lookups, schema mismatch) on the agent's
     // own stderr instead of only in the per-request 500 body. Throttled via an atomic
     // timestamp so a persistently failing config is visible without flooding the log,
@@ -750,7 +834,7 @@ private:
         }
         release_engine(e, pooled);
         write_decisions(result);
-        write_input_stats(true);
+        write_input_stats();
         maybe_init_pool();
     }
 
@@ -771,8 +855,141 @@ private:
             write_decisions(result);
         });
         input_records_.fetch_add(records, std::memory_order_relaxed);
-        write_input_stats(true);
+        write_input_stats();
         maybe_init_pool();
+    }
+
+    std::vector<BatchResult> evaluate_http_task(const std::shared_ptr<HttpTask>& task) {
+        std::vector<BatchResult> results;
+        const std::string_view body(task->body.data(), task->payload_size);
+        if (is_arrow_ipc_content_type(task->content_type)) {
+            input_bytes_.fetch_add(body.size(), std::memory_order_relaxed);
+            uint64_t records = for_each_arrow_ipc_batch(
+                body, [&](const std::shared_ptr<arrow::RecordBatch>& batch) {
+                    if (!batch || batch->num_rows() <= 0) return;
+                    bool pooled = false;
+                    RuleEngine* e = acquire_engine(pooled);
+                    try {
+                        results.push_back(e->evaluate_record_batch(batch));
+                    } catch (...) {
+                        release_engine(e, pooled);
+                        throw;
+                    }
+                    release_engine(e, pooled);
+                });
+            input_records_.fetch_add(records, std::memory_order_relaxed);
+        } else if (!config_.dedupe.enabled &&
+                   (is_ndjson_content_type(task->content_type) || body_is_ndjson(body))) {
+            uint64_t records = 0;
+            bool json_array = false;
+            for (char c : body) {
+                if (c == ' ' || c == '\t' || c == '\r' || c == '\n') continue;
+                json_array = c == '[';
+                break;
+            }
+            if (json_array) {
+                records = 1;
+            } else {
+                for (char c : body) if (c == '\n') ++records;
+                if (!body.empty() && body.back() != '\n') ++records;
+            }
+            input_bytes_.fetch_add(body.size(), std::memory_order_relaxed);
+            bool pooled = false;
+            RuleEngine* e = acquire_engine(pooled);
+            try {
+                results.push_back(json_array
+                    ? e->evaluate_json_array_padded(body)
+                    : e->evaluate_ndjson_padded(body));
+            } catch (...) {
+                release_engine(e, pooled);
+                throw;
+            }
+            release_engine(e, pooled);
+            if (json_array && !results.empty()) {
+                records = static_cast<uint64_t>(results.back().messages_processed);
+            }
+            input_records_.fetch_add(records, std::memory_order_relaxed);
+        } else {
+            std::vector<std::string> lines = split_lines(body);
+            uint64_t bytes_in = 0;
+            for (const auto& line : lines) bytes_in += line.size() + 1;
+            input_bytes_.fetch_add(bytes_in, std::memory_order_relaxed);
+            input_records_.fetch_add(lines.size(), std::memory_order_relaxed);
+            std::vector<std::string> records;
+            records.reserve(lines.size());
+            for (const auto& line : lines) {
+                std::string record = canonicalize(line);
+                if (dedupe_.duplicate(record)) continue;
+                records.push_back(std::move(record));
+                if (static_cast<int>(records.size()) >= config_.batch_size) {
+                    bool pooled = false;
+                    RuleEngine* e = acquire_engine(pooled);
+                    try {
+                        results.push_back(e->evaluate_messages(records));
+                    } catch (...) {
+                        release_engine(e, pooled);
+                        throw;
+                    }
+                    release_engine(e, pooled);
+                    records.clear();
+                }
+            }
+            if (!records.empty()) {
+                bool pooled = false;
+                RuleEngine* e = acquire_engine(pooled);
+                try {
+                    results.push_back(e->evaluate_messages(records));
+                } catch (...) {
+                    release_engine(e, pooled);
+                    throw;
+                }
+                release_engine(e, pooled);
+            }
+        }
+        maybe_init_pool();
+        return results;
+    }
+
+    void http_eval_loop() {
+        std::shared_ptr<HttpTask> task;
+        while (http_eval_queue_->pop(task)) {
+            try {
+                std::unique_lock<std::mutex> serial_lock(http_serial_eval_mu_, std::defer_lock);
+                if (config_.eval_shards > 1) {
+                    serial_lock.lock();
+                    if (pool_is_built()) serial_lock.unlock();
+                }
+                auto results = evaluate_http_task(task);
+                if (output_disabled_) {
+                    complete_http(task, {});
+                    continue;
+                }
+                SinkTask sink{task, std::move(results)};
+                if (!http_sink_queue_->try_push(std::move(sink))) {
+                    complete_http(task, {503, "output queue is full"});
+                    continue;
+                }
+                if (config_.ack_mode == "evaluated") complete_http(task, {});
+            } catch (const std::exception& e) {
+                log_eval_error(e.what());
+                complete_http(task, {500, e.what()});
+            }
+        }
+    }
+
+    void http_sink_loop() {
+        SinkTask task;
+        while (http_sink_queue_->pop(task)) {
+            try {
+                for (const auto& result : task.results) write_decisions(result);
+                if (config_.ack_mode != "evaluated") complete_http(task.request, {});
+            } catch (const std::exception& e) {
+                log_eval_error(e.what());
+                if (config_.ack_mode != "evaluated") {
+                    complete_http(task.request, {500, e.what()});
+                }
+            }
+        }
     }
 
     void write_decisions_arrow(const BatchResult& result) {
@@ -1003,23 +1220,75 @@ private:
 
     void run_http() {
         httplib::Server server;
-        server.Post("/v1/logs", [&](const httplib::Request& req, httplib::Response& res) {
-            try {
-                const std::string content_type = req.get_header_value("Content-Type");
-                if (is_arrow_ipc_content_type(content_type)) {
-                    evaluate_arrow_ipc_body(req.body);
-                } else if (!config_.dedupe.enabled &&
-                           (is_ndjson_content_type(content_type) || body_is_ndjson(req.body))) {
-                    evaluate_body(req.body);
-                } else {
-                    submit_lines(split_lines(req.body));
-                }
-                res.set_content("{\"ok\":true}\n", "application/json");
-            } catch (const std::exception& e) {
-                res.status = 500;
-                res.set_content(std::string("{\"ok\":false,\"error\":\"") + json_escape(e.what()) + "\"}\n",
+        server.new_task_queue = [this] {
+            return new httplib::ThreadPool(
+                static_cast<size_t>(std::max(1, config_.http_threads)),
+                static_cast<size_t>(std::max(1, config_.http_threads)),
+                static_cast<size_t>(std::max(1, config_.http_queue_depth)));
+        };
+        http_eval_queue_ = std::make_unique<BoundedQueue<std::shared_ptr<HttpTask>>>(
+            static_cast<size_t>(std::max(1, config_.eval_queue_depth)));
+        http_sink_queue_ = std::make_unique<BoundedQueue<SinkTask>>(
+            static_cast<size_t>(std::max(1, config_.sink_queue_depth)));
+        http_workers_stop_.store(false, std::memory_order_relaxed);
+        const int eval_workers = config_.dedupe.enabled
+            ? 1
+            : std::max(1, config_.eval_shards);
+        http_eval_threads_.reserve(static_cast<size_t>(eval_workers));
+        for (int i = 0; i < eval_workers; ++i) {
+            http_eval_threads_.emplace_back([this] { http_eval_loop(); });
+        }
+        http_sink_threads_.reserve(static_cast<size_t>(config_.sink_workers));
+        for (int i = 0; i < config_.sink_workers; ++i) {
+            http_sink_threads_.emplace_back([this] { http_sink_loop(); });
+        }
+        stats_thread_ = std::thread([this] { stats_loop(); });
+
+        server.Post("/v1/logs", [&](const httplib::Request& req, httplib::Response& res,
+                                    const httplib::ContentReader& reader) {
+            auto task = std::make_shared<HttpTask>();
+            task->content_type = req.get_header_value("Content-Type");
+            const size_t content_length = req.get_header_value_u64("Content-Length", 0);
+            if (content_length > static_cast<size_t>(config_.max_request_bytes)) {
+                res.status = 413;
+                res.set_content("{\"ok\":false,\"error\":\"request body is too large\"}\n",
                                 "application/json");
-                log_eval_error(e.what());
+                return;
+            }
+            if (content_length > 0) task->body.reserve(content_length + 64);
+            bool too_large = false;
+            const bool read_ok = reader([&](const char* data, size_t size) {
+                if (task->body.size() + size > static_cast<size_t>(config_.max_request_bytes)) {
+                    too_large = true;
+                    return false;
+                }
+                task->body.append(data, size);
+                return true;
+            });
+            if (!read_ok || too_large) {
+                res.status = too_large ? 413 : 400;
+                res.set_content("{\"ok\":false,\"error\":\"request body could not be read\"}\n",
+                                "application/json");
+                return;
+            }
+            task->payload_size = task->body.size();
+            if (!is_arrow_ipc_content_type(task->content_type)) {
+                task->body.resize(task->payload_size + simdjson::SIMDJSON_PADDING, '\0');
+            }
+            auto future = task->completion.get_future();
+            if (!http_eval_queue_->try_push(task)) {
+                res.status = 429;
+                res.set_content("{\"ok\":false,\"error\":\"evaluation queue is full\"}\n",
+                                "application/json");
+                return;
+            }
+            HttpOutcome outcome = future.get();
+            res.status = outcome.status;
+            if (outcome.status == 200) {
+                res.set_content("{\"ok\":true}\n", "application/json");
+            } else {
+                res.set_content(std::string("{\"ok\":false,\"error\":\"") +
+                                json_escape(outcome.error) + "\"}\n", "application/json");
             }
         });
         server.Get("/healthz", [&](const httplib::Request&, httplib::Response& res) {
@@ -1038,6 +1307,18 @@ private:
                   << config_.input.host << ":" << config_.input.port << "/v1/logs\n";
         server.listen(config_.input.host, config_.input.port);
         stopper.join();
+        http_eval_queue_->close();
+        for (auto& thread : http_eval_threads_) {
+            if (thread.joinable()) thread.join();
+        }
+        http_eval_threads_.clear();
+        http_sink_queue_->close();
+        for (auto& thread : http_sink_threads_) {
+            if (thread.joinable()) thread.join();
+        }
+        http_sink_threads_.clear();
+        http_workers_stop_.store(true, std::memory_order_relaxed);
+        if (stats_thread_.joinable()) stats_thread_.join();
     }
 
     InstanceConfig config_;
@@ -1079,6 +1360,13 @@ private:
     std::atomic<bool> s3_stop_{false};
     std::mutex s3_mu_;
     std::vector<std::string> rolled_parts_;
+    std::unique_ptr<BoundedQueue<std::shared_ptr<HttpTask>>> http_eval_queue_;
+    std::unique_ptr<BoundedQueue<SinkTask>> http_sink_queue_;
+    std::vector<std::thread> http_eval_threads_;
+    std::vector<std::thread> http_sink_threads_;
+    std::thread stats_thread_;
+    std::atomic<bool> http_workers_stop_{false};
+    std::mutex http_serial_eval_mu_;
 };
 
 std::string str_node(const YAML::Node& n, const char* key, const std::string& fallback = {}) {
@@ -1102,6 +1390,16 @@ InstanceConfig parse_instance(const YAML::Node& n) {
     c.eval_shards = int_node(n, "eval_shards", 1);
     c.s3_roll_mb = int_node(n, "s3_roll_mb", 64);
     c.s3_flush_seconds = int_node(n, "s3_flush_seconds", 10);
+    c.http_threads = int_node(n, "http_threads", c.http_threads);
+    c.http_queue_depth = int_node(n, "http_queue_depth", c.http_queue_depth);
+    c.eval_queue_depth = int_node(n, "eval_queue_depth", c.eval_queue_depth);
+    c.sink_queue_depth = int_node(n, "sink_queue_depth", c.sink_queue_depth);
+    c.sink_workers = int_node(n, "sink_workers", c.sink_workers);
+    if (c.sink_workers < 1) {
+        throw std::runtime_error("sink_workers must be at least 1");
+    }
+    c.max_request_bytes = static_cast<int64_t>(int_node(n, "max_request_mb", 256)) * 1024 * 1024;
+    c.ack_mode = str_node(n, "ack_mode", c.ack_mode);
     c.service = str_node(n, "service", c.name);
     c.source = str_node(n, "source", "log");
 
@@ -1178,6 +1476,13 @@ Options parse_args(int argc, char** argv) {
         else if (a == "--batch-size") opt.single.batch_size = std::atoi(need("--batch-size").c_str());
         else if (a == "--flush-ms") opt.single.flush_ms = std::atoi(need("--flush-ms").c_str());
         else if (a == "--eval-shards") opt.single.eval_shards = std::atoi(need("--eval-shards").c_str());
+        else if (a == "--http-threads") opt.single.http_threads = std::atoi(need("--http-threads").c_str());
+        else if (a == "--http-queue-depth") opt.single.http_queue_depth = std::atoi(need("--http-queue-depth").c_str());
+        else if (a == "--eval-queue-depth") opt.single.eval_queue_depth = std::atoi(need("--eval-queue-depth").c_str());
+        else if (a == "--sink-queue-depth") opt.single.sink_queue_depth = std::atoi(need("--sink-queue-depth").c_str());
+        else if (a == "--sink-workers") opt.single.sink_workers = std::atoi(need("--sink-workers").c_str());
+        else if (a == "--max-request-mb") opt.single.max_request_bytes = std::atoll(need("--max-request-mb").c_str()) * 1024 * 1024;
+        else if (a == "--ack-mode") opt.single.ack_mode = lower_ascii(need("--ack-mode"));
         else if (a == "--output") opt.single.output.type = need("--output");
         else if (a == "--output-path") opt.single.output.path = need("--output-path");
         else if (a == "--dead-letter-path") opt.single.output.dead_letter_path = need("--dead-letter-path");
@@ -1207,6 +1512,13 @@ Options parse_args(int argc, char** argv) {
                 << "  --host HOST --port PORT     HTTP input bind, default 127.0.0.1:9480\n"
                 << "  --batch-size N              default 2048\n"
                 << "  --eval-shards N             parallel eval engines for stateless rulesets, default 1\n"
+                << "  --http-threads N            bounded HTTP request workers\n"
+                << "  --http-queue-depth N        queued HTTP requests before 429, default 256\n"
+                << "  --eval-queue-depth N        queued evaluation batches, default 64\n"
+                << "  --sink-queue-depth N        queued output batches, default 64\n"
+                << "  --sink-workers N            asynchronous output serializers, default 1\n"
+                << "  --max-request-mb N          maximum HTTP request body, default 256\n"
+                << "  --ack-mode durable|evaluated  acknowledge after sink or evaluation\n"
                 << "  --output stdout|ndjson|arrow|none  default stdout\n"
                 << "  --output-path PATH|s3://...  output file, or an s3:// prefix for rolled part objects\n"
                 << "  --dead-letter-path PATH     write malformed/skipped records as NDJSON\n"
@@ -1221,6 +1533,14 @@ Options parse_args(int argc, char** argv) {
             std::cerr << "unknown argument: " << a << "\n";
             std::exit(2);
         }
+    }
+    if (opt.single.ack_mode != "durable" && opt.single.ack_mode != "evaluated") {
+        std::cerr << "--ack-mode must be durable or evaluated\n";
+        std::exit(2);
+    }
+    if (opt.single.sink_workers < 1) {
+        std::cerr << "--sink-workers must be at least 1\n";
+        std::exit(2);
     }
     if (opt.single.service == "unknown") opt.single.service = opt.single.name;
     return opt;

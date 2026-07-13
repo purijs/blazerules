@@ -152,6 +152,13 @@ void ModelRegistry::set_intra_op_threads(int threads) {
     intra_op_threads_ = threads;
 }
 
+void ModelRegistry::share_models_from(const ModelRegistry& other) {
+    if (this == &other) return;
+    std::scoped_lock lock(mutex_, other.mutex_);
+    intra_op_threads_ = other.intra_op_threads_;
+    models_ = other.models_;
+}
+
 bool ModelRegistry::contains(const std::string& name) const {
     std::lock_guard<std::mutex> lock(mutex_);
     return models_.find(name) != models_.end();

@@ -26,12 +26,24 @@ namespace {
 struct BorrowedFrames {
     std::vector<py::object> keepalive;
     std::vector<std::string_view> views;
+    std::vector<blazerules_io::ArrowIpcFrame> owned_views;
+};
+
+struct PythonBufferOwner {
+    explicit PythonBufferOwner(PyObject* value) : value(value) { Py_INCREF(value); }
+    ~PythonBufferOwner() {
+        const PyGILState_STATE state = PyGILState_Ensure();
+        Py_DECREF(value);
+        PyGILState_Release(state);
+    }
+    PyObject* value;
 };
 
 BorrowedFrames borrow_frames(py::sequence seq) {
     BorrowedFrames out;
     out.keepalive.reserve(static_cast<size_t>(py::len(seq)));
     out.views.reserve(static_cast<size_t>(py::len(seq)));
+    out.owned_views.reserve(static_cast<size_t>(py::len(seq)));
     for (py::handle item : seq) {
         Py_ssize_t size = 0;
         const char* data = nullptr;
@@ -45,6 +57,9 @@ BorrowedFrames borrow_frames(py::sequence seq) {
             out.keepalive.emplace_back(py::reinterpret_borrow<py::object>(item));
         }
         out.views.emplace_back(data, static_cast<size_t>(size));
+        out.owned_views.emplace_back(
+            reinterpret_cast<const uint8_t*>(data), static_cast<int64_t>(size),
+            std::make_shared<PythonBufferOwner>(item.ptr()));
     }
     return out;
 }
@@ -101,10 +116,17 @@ py::list batches_to_pyarrow_list(const std::vector<std::shared_ptr<arrow::Record
     return out;
 }
 
+void finalize_filesystems_capsule(void* token) noexcept {
+    blazerules_io::finalize_filesystems();
+    delete static_cast<int*>(token);
+}
+
 }  // namespace
 
 PYBIND11_MODULE(blazerules_io, m) {
     m.doc() = "BlazeRules streaming/IO connectors (CDC, Kafka, decoders).";
+    m.add_object("_filesystem_lifecycle",
+                 py::capsule(new int(0), finalize_filesystems_capsule));
 
     m.def("set_aws_profile", &blazerules::set_aws_profile,
           py::arg("profile"), py::arg("clear_env_credentials") = true,
@@ -128,6 +150,8 @@ PYBIND11_MODULE(blazerules_io, m) {
           "Clear the custom S3 endpoint URL.");
     m.def("current_aws_endpoint_url", &blazerules::current_aws_endpoint_url,
           "Return BLAZERULES_AWS_ENDPOINT_URL, AWS_ENDPOINT_URL, or AWS_ENDPOINT_URL_S3 if set.");
+    m.def("finalize_filesystems", &blazerules_io::finalize_filesystems,
+          "Finalize native filesystem runtimes after all S3 readers have stopped.");
     m.def("set_aws_credentials", &blazerules::set_aws_credentials,
           py::arg("access_key_id"), py::arg("secret_access_key"),
           py::arg("session_token") = "", py::arg("region") = "",
@@ -161,42 +185,108 @@ PYBIND11_MODULE(blazerules_io, m) {
         .value("CSV", blazerules_io::FileFormat::CSV)
         .value("NDJSON", blazerules_io::FileFormat::NDJSON);
 
+    py::enum_<blazerules_io::ArrowIpcValidationLevel>(m, "ArrowIpcValidationLevel")
+        .value("FULL", blazerules_io::ArrowIpcValidationLevel::FULL)
+        .value("STRUCTURAL", blazerules_io::ArrowIpcValidationLevel::STRUCTURAL)
+        .value("TRUSTED", blazerules_io::ArrowIpcValidationLevel::TRUSTED);
+
+    py::class_<blazerules_io::ArrowIpcReadOptions>(m, "ArrowIpcReadOptions")
+        .def(py::init<>())
+        .def_readwrite("included_fields", &blazerules_io::ArrowIpcReadOptions::included_fields)
+        .def_readwrite("validation", &blazerules_io::ArrowIpcReadOptions::validation)
+        .def_readwrite("use_threads", &blazerules_io::ArrowIpcReadOptions::use_threads);
+
+    py::class_<blazerules_io::FileReadOptions>(m, "FileReadOptions")
+        .def(py::init<>())
+        .def_readwrite("batch_size", &blazerules_io::FileReadOptions::batch_size)
+        .def_readwrite("ndjson_chunk_bytes", &blazerules_io::FileReadOptions::ndjson_chunk_bytes)
+        .def_readwrite("included_fields", &blazerules_io::FileReadOptions::included_fields)
+        .def_readwrite("included_field_indices", &blazerules_io::FileReadOptions::included_field_indices)
+        .def_readwrite("use_threads", &blazerules_io::FileReadOptions::use_threads)
+        .def_readwrite("native_s3", &blazerules_io::FileReadOptions::native_s3)
+        .def_readwrite("allow_s3_cli_fallback", &blazerules_io::FileReadOptions::allow_s3_cli_fallback)
+        .def_readwrite("arrow_validation", &blazerules_io::FileReadOptions::arrow_validation);
+
     py::class_<blazerules_io::ArrowIpcDecoder>(m, "ArrowIpcDecoder")
         .def(py::init<>())
         .def("decode_batches",
-             [](const blazerules_io::ArrowIpcDecoder& d, py::sequence frames) {
+             [](const blazerules_io::ArrowIpcDecoder& d, py::sequence frames,
+                const blazerules_io::ArrowIpcReadOptions& options) {
                  auto borrowed = borrow_frames(frames);
                  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
                  {
                      py::gil_scoped_release release;
-                     batches = d.decode_batches(borrowed.views);
+                     d.decode_each(borrowed.owned_views, [&](const auto& batch) {
+                         batches.push_back(batch);
+                         return true;
+                     }, options);
                  }
                  return batches_to_pyarrow_list(batches);
              },
-             py::arg("frames"),
+             py::arg("frames"), py::arg("options") = blazerules_io::ArrowIpcReadOptions{},
              "Decode Arrow IPC stream/file payloads into a list of pyarrow.RecordBatch objects.")
         .def("decode_batch",
-             [](const blazerules_io::ArrowIpcDecoder& d, py::sequence frames) {
+             [](const blazerules_io::ArrowIpcDecoder& d, py::sequence frames,
+                const blazerules_io::ArrowIpcReadOptions& options) {
                  auto borrowed = borrow_frames(frames);
-                 std::shared_ptr<arrow::RecordBatch> batch;
+                 std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
                  {
                      py::gil_scoped_release release;
-                     batch = d.decode_batch(borrowed.views);
+                     d.decode_each(borrowed.owned_views, [&](const auto& batch) {
+                         batches.push_back(batch);
+                         return true;
+                     }, options);
+                 }
+                 if (batches.empty()) return py::object(py::none());
+                 std::shared_ptr<arrow::RecordBatch> batch = batches.front();
+                 if (batches.size() > 1) {
+                     auto table_result = arrow::Table::FromRecordBatches(batches);
+                     if (!table_result.ok()) throw std::runtime_error(table_result.status().ToString());
+                     auto combined = table_result.ValueOrDie()->CombineChunksToBatch();
+                     if (!combined.ok()) throw std::runtime_error(combined.status().ToString());
+                     batch = combined.ValueOrDie();
                  }
                  return record_batch_to_pyarrow(batch);
              },
-             py::arg("frames"),
+             py::arg("frames"), py::arg("options") = blazerules_io::ArrowIpcReadOptions{},
              "Decode Arrow IPC frames and combine them into one pyarrow.RecordBatch.")
+        .def("decode_each",
+             [](const blazerules_io::ArrowIpcDecoder& d, py::sequence frames,
+                py::function callback, const blazerules_io::ArrowIpcReadOptions& options) {
+                 auto borrowed = borrow_frames(frames);
+                 py::gil_scoped_release release;
+                 return d.decode_each(borrowed.owned_views, [&](const auto& batch) {
+                     py::gil_scoped_acquire acquire;
+                     py::object result = callback(record_batch_to_pyarrow(batch));
+                     return result.is_none() || result.cast<bool>();
+                 }, options);
+             },
+             py::arg("frames"), py::arg("callback"),
+             py::arg("options") = blazerules_io::ArrowIpcReadOptions{},
+             "Decode Arrow IPC frames incrementally and invoke callback for each batch.")
         .def("decode_file",
-             [](const blazerules_io::ArrowIpcDecoder& d, const std::string& path) {
+             [](const blazerules_io::ArrowIpcDecoder& d, const std::string& path,
+                const blazerules_io::ArrowIpcReadOptions& options) {
                  std::vector<std::shared_ptr<arrow::RecordBatch>> batches;
                  {
                      py::gil_scoped_release release;
-                     batches = d.decode_file(path);
+                     batches = d.decode_file(path, options);
                  }
                  return batches_to_pyarrow_list(batches);
              },
-             py::arg("path"));
+             py::arg("path"), py::arg("options") = blazerules_io::ArrowIpcReadOptions{})
+        .def("decode_file_each",
+             [](const blazerules_io::ArrowIpcDecoder& d, const std::string& path,
+                py::function callback, const blazerules_io::ArrowIpcReadOptions& options) {
+                 py::gil_scoped_release release;
+                 return d.decode_file_each(path, [&](const auto& batch) {
+                     py::gil_scoped_acquire acquire;
+                     py::object result = callback(record_batch_to_pyarrow(batch));
+                     return result.is_none() || result.cast<bool>();
+                 }, options);
+             },
+             py::arg("path"), py::arg("callback"),
+             py::arg("options") = blazerules_io::ArrowIpcReadOptions{});
 
     m.def("read_record_batches",
           [](const std::string& path, const std::string& format, int64_t batch_size) {
@@ -211,6 +301,21 @@ PYBIND11_MODULE(blazerules_io, m) {
           py::arg("path"), py::arg("format") = "auto", py::arg("batch_size") = 65536,
           "Read Arrow IPC, Parquet, CSV, or NDJSON/JSON files into pyarrow.RecordBatch objects.")
         ;
+
+    m.def("for_each_record_batch",
+          [](const std::string& path, const std::string& format, py::function callback,
+             const blazerules_io::FileReadOptions& options) {
+              py::gil_scoped_release release;
+              return blazerules_io::for_each_record_batch(
+                  path, blazerules_io::parse_file_format(format), [&](const auto& batch) {
+                      py::gil_scoped_acquire acquire;
+                      py::object result = callback(record_batch_to_pyarrow(batch));
+                      return result.is_none() || result.cast<bool>();
+                  }, options);
+          },
+          py::arg("path"), py::arg("format"), py::arg("callback"),
+          py::arg("options") = blazerules_io::FileReadOptions{},
+          "Stream local or S3 data and invoke callback as each Arrow batch arrives.");
 
     m.def("read_ndjson_bytes",
           [](const std::string& path) {
@@ -353,12 +458,18 @@ PYBIND11_MODULE(blazerules_io, m) {
         .def_readwrite("consumer_conf", &blazerules_io::StreamRunConfig::consumer_conf)
         .def_readwrite("producer_conf", &blazerules_io::StreamRunConfig::producer_conf)
         .def_readwrite("batch_size", &blazerules_io::StreamRunConfig::batch_size)
+        .def_readwrite("worker_count", &blazerules_io::StreamRunConfig::worker_count)
+        .def_readwrite("queue_depth", &blazerules_io::StreamRunConfig::queue_depth)
         .def_readwrite("poll_timeout_ms", &blazerules_io::StreamRunConfig::poll_timeout_ms)
         .def_readwrite("flush_timeout_ms", &blazerules_io::StreamRunConfig::flush_timeout_ms)
+        .def_readwrite("flush_interval_ms", &blazerules_io::StreamRunConfig::flush_interval_ms)
         .def_readwrite("max_messages", &blazerules_io::StreamRunConfig::max_messages)
         .def_readwrite("max_batches", &blazerules_io::StreamRunConfig::max_batches)
         .def_readwrite("commit_offsets", &blazerules_io::StreamRunConfig::commit_offsets)
+        .def_readwrite("partition_affine", &blazerules_io::StreamRunConfig::partition_affine)
+        .def_readwrite("output_mode", &blazerules_io::StreamRunConfig::output_mode)
         .def_readwrite("payload_format", &blazerules_io::StreamRunConfig::payload_format)
+        .def_readwrite("arrow_validation", &blazerules_io::StreamRunConfig::arrow_validation)
         .def_readwrite("avro_schema_json", &blazerules_io::StreamRunConfig::avro_schema_json)
         .def_readwrite("protobuf_descriptor_set", &blazerules_io::StreamRunConfig::protobuf_descriptor_set)
         .def_readwrite("protobuf_message_type", &blazerules_io::StreamRunConfig::protobuf_message_type)

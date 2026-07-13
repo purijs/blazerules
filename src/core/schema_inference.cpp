@@ -591,6 +591,71 @@ BlazeRulesResult<BlazeRulesSchema> infer_schema_from_ndjson(
     return infer_from_padded_messages(rules, lines, options);
 }
 
+BlazeRulesResult<BlazeRulesSchema> infer_schema_from_json_array(
+    const RuleFileSpec& rules,
+    std::string_view json_array,
+    bool padded,
+    const SchemaInferenceOptions& options) {
+    if (json_array.empty()) {
+        return BlazeRulesResult<BlazeRulesSchema>::err(
+            {BlazeRulesError::MISSING_REQUIRED_FIELD,
+             "cannot infer schema from an empty JSON array batch",
+             "schema_inference", "", -1, BlazeRulesError::Domain::SCHEMA});
+    }
+
+    std::string owned;
+    std::string_view input = json_array;
+    if (!padded) {
+        owned.assign(json_array.data(), json_array.size());
+        owned.resize(json_array.size() + simdjson::SIMDJSON_PADDING, '\0');
+        input = std::string_view(owned.data(), json_array.size());
+    }
+
+    simdjson::ondemand::parser parser;
+    simdjson::ondemand::document doc;
+    if (parser.iterate(input.data(), input.size(), input.size() + simdjson::SIMDJSON_PADDING).get(doc)) {
+        return BlazeRulesResult<BlazeRulesSchema>::err(
+            {BlazeRulesError::SCHEMA_MISMATCH,
+             "json-array input must be valid padded JSON",
+             "schema_inference", "", -1, BlazeRulesError::Domain::SCHEMA});
+    }
+    simdjson::ondemand::array rows_array;
+    if (doc.get_array().get(rows_array)) {
+        return BlazeRulesResult<BlazeRulesSchema>::err(
+            {BlazeRulesError::SCHEMA_MISMATCH,
+             "json-array input must be a top-level array",
+             "schema_inference", "", -1, BlazeRulesError::Domain::SCHEMA});
+    }
+
+    InferenceBuilder builder(rules);
+    builder.set_options(options);
+    int64_t rows = 0;
+    for (auto row_result : rows_array) {
+        if (rows >= options.sample_rows) break;
+        simdjson::ondemand::value row_value;
+        if (std::move(row_result).get(row_value)) continue;
+        simdjson::ondemand::object object;
+        if (row_value.get_object().get(object)) continue;
+        builder.begin_row();
+        for (auto field_result : object) {
+            simdjson::ondemand::field field;
+            if (std::move(field_result).get(field)) continue;
+            std::string_view key = field.escaped_key();
+            simdjson::ondemand::value value = field.value();
+            builder.observe_json_field(key, value, 0);
+        }
+        builder.end_row();
+        ++rows;
+    }
+    if (rows == 0) {
+        return BlazeRulesResult<BlazeRulesSchema>::err(
+            {BlazeRulesError::MISSING_REQUIRED_FIELD,
+             "cannot infer schema from a JSON array with no object rows",
+             "schema_inference", "", -1, BlazeRulesError::Domain::SCHEMA});
+    }
+    return builder.finish();
+}
+
 BlazeRulesResult<BlazeRulesSchema> infer_schema_from_arrow(
     const RuleFileSpec& rules,
     const std::shared_ptr<arrow::RecordBatch>& batch,

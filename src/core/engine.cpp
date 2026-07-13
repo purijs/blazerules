@@ -849,6 +849,19 @@ void RuleEngine::ensure_schema_bound_from_ndjson(std::string_view ndjson_bytes) 
     compile_pending_rules_after_bind();
 }
 
+void RuleEngine::ensure_schema_bound_from_json_array(std::string_view json_bytes, bool padded) {
+    if (schema_state_ != SchemaState::UNBOUND) return;
+    if (!pending_rules_) {
+        throw BlazeRulesConfigError({BlazeRulesError::MISSING_REQUIRED_FIELD,
+                              "load rules before evaluating with inferred schema",
+                              "schema_inference", "", -1, BlazeRulesError::Domain::CONFIG});
+    }
+    auto inferred = infer_schema_from_json_array(*pending_rules_, json_bytes, padded);
+    if (inferred.is_error()) throw BlazeRulesSchemaError(inferred.error());
+    bind_schema(std::move(inferred.value()), SchemaState::INFERRED_BOUND);
+    compile_pending_rules_after_bind();
+}
+
 void RuleEngine::ensure_schema_bound_from_arrow(const std::shared_ptr<arrow::RecordBatch>& batch) {
     if (schema_state_ != SchemaState::UNBOUND) return;
     if (!pending_rules_) {
@@ -1086,6 +1099,23 @@ EvalOptions RuleEngine::eval_options() const {
     options.enable_thread_affinity = config_.enable_thread_affinity;
     options.result_buffer_reuse = config_.result_buffer_reuse;
     options.materialize_rule_bitmasks = config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_matched_indices = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_decision_codes = config_.output_detail == EngineConfig::OUTPUT_CODES ||
+        config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_decision_strings = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_scores = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_risk_bands = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_winning_rules = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_grouped_indices = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
+    options.materialize_model_outputs = config_.output_detail == EngineConfig::OUTPUT_DECISIONS ||
+        config_.output_detail == EngineConfig::OUTPUT_BITMASKS;
     options.arena_size_bytes = config_.arena_size_bytes;
     return options;
 }
@@ -1490,17 +1520,20 @@ void RuleEngine::evaluate_internal_into(const std::shared_ptr<arrow::RecordBatch
     compute_vector_channels(*encoded, rs->vector_channels, vector_scores);
     result.timing.model_score_us = micros_since(stage);
 
+    EvalOptions options = eval_options();
     result.model_outputs.clear();
-    for (size_t c = 0; c < rs->model_channels.size() && c < model_scores.size(); ++c) {
-        ModelChannelOutput channel_output;
-        channel_output.model_name = rs->model_channels[c].model_name;
-        channel_output.column_name = rs->model_channels[c].injected_name;
-        const std::vector<double>& src = model_scores[c];
-        channel_output.values.resize(src.size());
-        for (size_t r = 0; r < src.size(); ++r) {
-            channel_output.values[r] = static_cast<float>(src[r]);
+    if (options.materialize_model_outputs) {
+        for (size_t c = 0; c < rs->model_channels.size() && c < model_scores.size(); ++c) {
+            ModelChannelOutput channel_output;
+            channel_output.model_name = rs->model_channels[c].model_name;
+            channel_output.column_name = rs->model_channels[c].injected_name;
+            const std::vector<double>& src = model_scores[c];
+            channel_output.values.resize(src.size());
+            for (size_t r = 0; r < src.size(); ++r) {
+                channel_output.values[r] = static_cast<float>(src[r]);
+            }
+            result.model_outputs.push_back(std::move(channel_output));
         }
-        result.model_outputs.push_back(std::move(channel_output));
     }
 
     stage = std::chrono::steady_clock::now();
@@ -1529,7 +1562,7 @@ void RuleEngine::evaluate_internal_into(const std::shared_ptr<arrow::RecordBatch
     result.timing.kernel_bind_us = micros_since(stage);
 
     stage = std::chrono::steady_clock::now();
-    evaluate_rules(*augmented, *rs, resolved, eval_options(), result);
+    evaluate_rules(*augmented, *rs, resolved, options, result);
     result.timing.evaluation_us = micros_since(stage);
 
     stage = std::chrono::steady_clock::now();
@@ -1658,6 +1691,58 @@ void RuleEngine::evaluate_ndjson_padded_into(std::string_view ndjson_bytes, Batc
     evaluate_internal_into(batch, processed, skipped, last, result);
 }
 
+BatchResult RuleEngine::evaluate_json_array(std::string_view json_bytes) {
+    BatchResult result;
+    evaluate_json_array_into(json_bytes, result);
+    return result;
+}
+
+void RuleEngine::evaluate_json_array_into(std::string_view json_bytes, BatchResult& result) {
+    std::unique_lock<std::shared_mutex> state_lock(state_mutex_);
+    ensure_schema_bound_from_json_array(json_bytes, false);
+    auto stage = std::chrono::steady_clock::now();
+    transposer_->reset();
+    transposer_->set_max_error_samples(config_.max_error_samples);
+    transposer_->add_json_array(json_bytes);
+    int processed = transposer_->current_size() + transposer_->skipped_count();
+    int skipped = transposer_->skipped_count();
+    std::string last = transposer_->last_error();
+    auto batch = transposer_->finish();
+    result.timing.transpose_us = micros_since(stage);
+    result.messages_processed = processed;
+    result.messages_skipped = skipped;
+    result.last_ingest_error = last;
+    result.evaluation_timestamp_ms = epoch_millis();
+    apply_ingest_error_policy(*transposer_, result);
+    evaluate_internal_into(batch, processed, skipped, last, result);
+}
+
+BatchResult RuleEngine::evaluate_json_array_padded(std::string_view json_bytes) {
+    BatchResult result;
+    evaluate_json_array_padded_into(json_bytes, result);
+    return result;
+}
+
+void RuleEngine::evaluate_json_array_padded_into(std::string_view json_bytes, BatchResult& result) {
+    std::unique_lock<std::shared_mutex> state_lock(state_mutex_);
+    ensure_schema_bound_from_json_array(json_bytes, true);
+    auto stage = std::chrono::steady_clock::now();
+    transposer_->reset();
+    transposer_->set_max_error_samples(config_.max_error_samples);
+    transposer_->add_json_array_padded(json_bytes);
+    int processed = transposer_->current_size() + transposer_->skipped_count();
+    int skipped = transposer_->skipped_count();
+    std::string last = transposer_->last_error();
+    auto batch = transposer_->finish();
+    result.timing.transpose_us = micros_since(stage);
+    result.messages_processed = processed;
+    result.messages_skipped = skipped;
+    result.last_ingest_error = last;
+    result.evaluation_timestamp_ms = epoch_millis();
+    apply_ingest_error_policy(*transposer_, result);
+    evaluate_internal_into(batch, processed, skipped, last, result);
+}
+
 BatchResult RuleEngine::evaluate_record_batch(const std::shared_ptr<arrow::RecordBatch>& batch) {
     BatchResult result;
     evaluate_record_batch_into(batch, result);
@@ -1690,6 +1775,7 @@ std::vector<std::unique_ptr<RuleEngine>> RuleEngine::create_shards(int shard_cou
         shard->pending_rules_ = pending_rules_;
         shard->pending_rules_path_ = pending_rules_path_;
         shard->pending_conflict_report_ = pending_conflict_report_;
+        shard->model_registry_.share_models_from(model_registry_);
         if (rs) shard->install_ruleset(rs);
         shards.push_back(std::move(shard));
     }
@@ -1710,6 +1796,7 @@ void RuleEngine::ensure_partition_shards(int shard_count) {
         shard->pending_rules_ = pending_rules_;
         shard->pending_rules_path_ = pending_rules_path_;
         shard->pending_conflict_report_ = pending_conflict_report_;
+        shard->model_registry_.share_models_from(model_registry_);
         if (rs) shard->install_ruleset(rs);
         partition_shards_.push_back(std::move(shard));
     }

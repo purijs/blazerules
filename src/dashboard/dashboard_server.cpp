@@ -291,12 +291,17 @@ std::string DashboardServer::summary_json(const std::string& instance) const {
         batches = metric_value(s.metrics, "blazerules_batches_evaluated_total");
         skipped = metric_value(s.metrics, "blazerules_records_skipped_total");
         matched = metric_value(s.metrics, "blazerules_records_matched_total");
-        if (s.input_records_total > 0.0) {
-            records = s.input_records_total;
-        }
         if (records == 0.0 && s.decisions.rows_seen > 0) {
             records = static_cast<double>(s.decisions.rows_seen);
+        }
+        // Independent of records: input_records_total (below) commonly makes records
+        // non-zero even with no metrics endpoint configured, which must not suppress
+        // this decision-log-derived fallback for matched.
+        if (matched == 0.0 && s.decisions.matched_seen > 0) {
             matched = static_cast<double>(s.decisions.matched_seen);
+        }
+        if (s.input_records_total > 0.0) {
+            records = s.input_records_total;
         }
         if (skipped == 0.0 && err.rows_seen > 0) {
             skipped = static_cast<double>(err.rows_seen);

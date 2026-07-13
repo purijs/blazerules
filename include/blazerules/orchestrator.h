@@ -18,6 +18,14 @@ struct EvalOptions {
     bool enable_thread_affinity = false;
     bool result_buffer_reuse = true;
     bool materialize_rule_bitmasks = true;
+    bool materialize_matched_indices = true;
+    bool materialize_decision_codes = true;
+    bool materialize_decision_strings = true;
+    bool materialize_scores = true;
+    bool materialize_risk_bands = true;
+    bool materialize_winning_rules = true;
+    bool materialize_grouped_indices = true;
+    bool materialize_model_outputs = true;
     size_t arena_size_bytes = 8 * 1024 * 1024;
 };
 

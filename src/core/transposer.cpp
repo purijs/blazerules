@@ -12,6 +12,9 @@
 #include <unordered_map>
 
 #include <re2/re2.h>
+#include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
+#include <tbb/task_arena.h>
 
 namespace {
 
@@ -496,6 +499,15 @@ std::shared_ptr<arrow::Buffer> wrap_string_data(const std::string& data) {
 
 } // namespace
 
+struct BatchTransposer::WorkerPoolState {
+    explicit WorkerPoolState(int concurrency)
+        : concurrency(std::max(1, concurrency)), arena(this->concurrency) {}
+
+    int concurrency;
+    tbb::task_arena arena;
+    std::vector<std::unique_ptr<BatchTransposer>> workers;
+};
+
 void BatchTransposer::ColumnBuffer::reset() {
     length = 0;
     null_count = 0;
@@ -538,6 +550,8 @@ BatchTransposer::BatchTransposer(const BlazeRulesSchema& schema, arrow::MemoryPo
     make_buffers();
     rebuild_projected_indices();
 }
+
+BatchTransposer::~BatchTransposer() = default;
 
 void BatchTransposer::make_buffers() {
     columns_.clear();
@@ -1225,6 +1239,48 @@ void BatchTransposer::add_ndjson_padded(std::string_view ndjson_bytes, int threa
     parse_ndjson_parallel(ndjson_bytes, thread_count);
 }
 
+void BatchTransposer::add_json_array(std::string_view json_bytes) {
+    if (json_bytes.empty()) return;
+    batch_json_.assign(json_bytes.data(), json_bytes.size());
+    batch_json_.resize(json_bytes.size() + simdjson::SIMDJSON_PADDING, '\0');
+    parse_json_array_view(std::string_view(batch_json_.data(), json_bytes.size()));
+}
+
+void BatchTransposer::add_json_array_padded(std::string_view json_bytes) {
+    if (json_bytes.empty()) return;
+    parse_json_array_view(json_bytes);
+}
+
+void BatchTransposer::parse_json_array_view(std::string_view json_bytes) {
+    simdjson::ondemand::document doc;
+    if (parser_.iterate(json_bytes.data(), json_bytes.size(),
+                        json_bytes.size() + simdjson::SIMDJSON_PADDING).get(doc)) {
+        record_error("MALFORMED_JSON", "malformed json array", "json-array",
+                     input_row_index_, {}, true);
+        ++input_row_index_;
+        return;
+    }
+
+    simdjson::ondemand::array rows;
+    if (doc.get_array().get(rows)) {
+        record_error("MALFORMED_JSON", "json-array input must be a top-level array",
+                     "json-array", input_row_index_, {}, true);
+        ++input_row_index_;
+        return;
+    }
+
+    for (auto row_result : rows) {
+        simdjson::ondemand::value row;
+        if (std::move(row_result).get(row)) {
+            record_error("MALFORMED_JSON", "malformed json array element",
+                         "json-array", input_row_index_, {}, true);
+            ++input_row_index_;
+            continue;
+        }
+        append_json_document(row);
+    }
+}
+
 void BatchTransposer::parse_ndjson_view(std::string_view ndjson_bytes) {
     if (ndjson_bytes.empty()) return;
     simdjson::ondemand::document_stream docs;
@@ -1342,10 +1398,21 @@ void BatchTransposer::parse_ndjson_parallel(std::string_view ndjson_bytes, int t
         return;
     }
 
-    std::vector<std::unique_ptr<BatchTransposer>> workers;
+    const int concurrency = std::min<int>(thread_count, static_cast<int>(chunks.size()));
+    if (!worker_pool_ || worker_pool_->concurrency != concurrency) {
+        worker_pool_ = std::make_unique<WorkerPoolState>(concurrency);
+    }
+    auto& cached_workers = worker_pool_->workers;
+    while (cached_workers.size() < chunks.size()) {
+        cached_workers.push_back(std::make_unique<BatchTransposer>(schema_, pool_));
+    }
+
+    std::vector<BatchTransposer*> workers;
     workers.reserve(chunks.size());
-    for (const auto& [start, end] : chunks) {
-        auto worker = std::make_unique<BatchTransposer>(schema_, pool_);
+    for (size_t i = 0; i < chunks.size(); ++i) {
+        const auto [start, end] = chunks[i];
+        BatchTransposer* worker = cached_workers[i].get();
+        worker->reset();
         worker->set_projected_fields(projected_indices_);
         worker->set_max_error_samples(max_error_samples_);
         worker->set_array_any_channels(array_any_channels_, array_any_lookups_);
@@ -1353,120 +1420,180 @@ void BatchTransposer::parse_ndjson_parallel(std::string_view ndjson_bytes, int t
         worker->learned_field_keys_ = learned_field_keys_;
         worker->layout_is_flat_ = layout_is_flat_;
         worker->reserve(estimate_rows_for_chunk(ndjson_bytes, start, end));
-        workers.push_back(std::move(worker));
+        workers.push_back(worker);
     }
 
-    std::vector<std::thread> threads;
-    threads.reserve(chunks.size());
-    for (size_t i = 0; i < chunks.size(); ++i) {
-        auto [start, end] = chunks[i];
-        BatchTransposer* worker = workers[i].get();
-        threads.emplace_back([worker, ndjson_bytes, start, end]() {
-            worker->parse_ndjson_view(ndjson_bytes.substr(start, end - start));
+    worker_pool_->arena.execute([&]() {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, chunks.size(), 1),
+                          [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t i = range.begin(); i != range.end(); ++i) {
+                const auto [start, end] = chunks[i];
+                workers[i]->parse_ndjson_view(ndjson_bytes.substr(start, end - start));
+            }
         });
-    }
-    for (auto& thread : threads) thread.join();
+    });
+
     int64_t row_base = input_row_index_;
-    for (auto& worker : workers) {
+    for (BatchTransposer* worker : workers) {
         for (auto& sample : worker->error_samples_) sample.row_index += row_base;
         int64_t consumed = worker->input_row_index_;
-        merge_from(*worker);
         row_base += consumed;
     }
+    merge_workers_parallel(workers);
     input_row_index_ = row_base;
 }
 
-void BatchTransposer::merge_from(BatchTransposer& other) {
-    auto merge_validity = [](ColumnBuffer& dst, const ColumnBuffer& src) {
-        if (src.length == 0) return;
-        bool needs_bitmap = dst.null_count > 0 || src.null_count > 0 ||
-                            !dst.validity_bits.empty() || !src.validity_bits.empty();
-        if (!needs_bitmap) return;
+void BatchTransposer::merge_workers_parallel(const std::vector<BatchTransposer*>& workers) {
+    if (workers.empty()) return;
 
-        int64_t old_length = dst.length;
-        if (dst.validity_bits.empty()) {
-            for (int64_t row = 0; row < old_length; ++row) set_bit(dst.validity_bits, row, true);
+    const int64_t existing_rows = current_size_;
+    std::vector<int64_t> row_bases(workers.size());
+    int64_t total_rows = existing_rows;
+    for (size_t i = 0; i < workers.size(); ++i) {
+        row_bases[i] = total_rows;
+        total_rows += workers[i]->current_size_;
+    }
+
+    auto copy_bitmap = [](const std::vector<uint8_t>& source,
+                          int64_t source_rows,
+                          std::vector<uint8_t>& destination,
+                          int64_t destination_base,
+                          bool implicit_value) {
+        for (int64_t row = 0; row < source_rows; ++row) {
+            const bool value = source.empty()
+                ? implicit_value
+                : ((source[static_cast<size_t>(row >> 3)] >> (row & 7)) & 1u) != 0;
+            set_bit(destination, destination_base + row, value);
         }
-        if (src.validity_bits.empty()) {
-            for (int64_t row = 0; row < src.length; ++row) {
-                set_bit(dst.validity_bits, old_length + row, true);
-            }
-        } else {
-            for (int64_t row = 0; row < src.length; ++row) {
-                bool valid = (src.validity_bits[static_cast<size_t>(row >> 3)] >> (row & 7)) & 1u;
-                set_bit(dst.validity_bits, old_length + row, valid);
-            }
-        }
-        dst.null_count += src.null_count;
     };
 
-    for (int i : projected_indices_) {
-        ColumnBuffer& dst = columns_[i];
-        ColumnBuffer& src = other.columns_[i];
-        if (dst.length == 0) {
-            dst.f32 = std::move(src.f32);
-            dst.f64 = std::move(src.f64);
-            dst.i32 = std::move(src.i32);
-            dst.i64 = std::move(src.i64);
-            dst.bool_bits = std::move(src.bool_bits);
-            dst.validity_bits = std::move(src.validity_bits);
-            dst.offsets = std::move(src.offsets);
-            dst.string_data = std::move(src.string_data);
-            dst.length = src.length;
-            dst.null_count = src.null_count;
-            continue;
-        }
-        merge_validity(dst, src);
-        switch (dst.type) {
-            case ColumnType::FLOAT32:
-                dst.f32.insert(dst.f32.end(), src.f32.begin(), src.f32.end());
-                break;
-            case ColumnType::FLOAT64:
-                dst.f64.insert(dst.f64.end(), src.f64.begin(), src.f64.end());
-                break;
-            case ColumnType::INT32:
-                dst.i32.insert(dst.i32.end(), src.i32.begin(), src.i32.end());
-                break;
-            case ColumnType::INT64:
-            case ColumnType::TIMESTAMP_MS:
-                dst.i64.insert(dst.i64.end(), src.i64.begin(), src.i64.end());
-                break;
-            case ColumnType::BOOLEAN: {
-                int64_t old_length = dst.length;
-                for (int64_t row = 0; row < src.length; ++row) {
-                    bool value = (src.bool_bits[static_cast<size_t>(row >> 3)] >> (row & 7)) & 1;
-                    set_bit(dst.bool_bits, old_length + row, value);
+    worker_pool_->arena.execute([&]() {
+        tbb::parallel_for(tbb::blocked_range<size_t>(0, projected_indices_.size(), 1),
+                          [&](const tbb::blocked_range<size_t>& range) {
+            for (size_t projected_pos = range.begin(); projected_pos != range.end();
+                 ++projected_pos) {
+                const int column_index = projected_indices_[projected_pos];
+                ColumnBuffer& dst = columns_[column_index];
+                const int64_t old_length = dst.length;
+
+                int64_t merged_length = old_length;
+                int64_t merged_nulls = dst.null_count;
+                size_t merged_string_bytes = dst.string_data.size();
+                bool needs_validity = !dst.validity_bits.empty() || dst.null_count > 0;
+                for (BatchTransposer* worker : workers) {
+                    const ColumnBuffer& src = worker->columns_[column_index];
+                    merged_length += src.length;
+                    merged_nulls += src.null_count;
+                    merged_string_bytes += src.string_data.size();
+                    needs_validity = needs_validity || !src.validity_bits.empty() ||
+                                     src.null_count > 0;
                 }
+
+                if (needs_validity) {
+                    std::vector<uint8_t> validity(
+                        static_cast<size_t>((merged_length + 7) / 8), 0);
+                    copy_bitmap(dst.validity_bits, old_length, validity, 0, true);
+                    for (size_t i = 0; i < workers.size(); ++i) {
+                        const ColumnBuffer& src = workers[i]->columns_[column_index];
+                        copy_bitmap(src.validity_bits, src.length, validity,
+                                    row_bases[i], true);
+                    }
+                    dst.validity_bits = std::move(validity);
+                } else {
+                    dst.validity_bits.clear();
+                }
+
+                switch (dst.type) {
+                    case ColumnType::FLOAT32:
+                        dst.f32.resize(static_cast<size_t>(merged_length));
+                        for (size_t i = 0; i < workers.size(); ++i) {
+                            const auto& src = workers[i]->columns_[column_index].f32;
+                            std::copy(src.begin(), src.end(), dst.f32.begin() + row_bases[i]);
+                        }
+                        break;
+                    case ColumnType::FLOAT64:
+                        dst.f64.resize(static_cast<size_t>(merged_length));
+                        for (size_t i = 0; i < workers.size(); ++i) {
+                            const auto& src = workers[i]->columns_[column_index].f64;
+                            std::copy(src.begin(), src.end(), dst.f64.begin() + row_bases[i]);
+                        }
+                        break;
+                    case ColumnType::INT32:
+                        dst.i32.resize(static_cast<size_t>(merged_length));
+                        for (size_t i = 0; i < workers.size(); ++i) {
+                            const auto& src = workers[i]->columns_[column_index].i32;
+                            std::copy(src.begin(), src.end(), dst.i32.begin() + row_bases[i]);
+                        }
+                        break;
+                    case ColumnType::INT64:
+                    case ColumnType::TIMESTAMP_MS:
+                        dst.i64.resize(static_cast<size_t>(merged_length));
+                        for (size_t i = 0; i < workers.size(); ++i) {
+                            const auto& src = workers[i]->columns_[column_index].i64;
+                            std::copy(src.begin(), src.end(), dst.i64.begin() + row_bases[i]);
+                        }
+                        break;
+                    case ColumnType::BOOLEAN: {
+                        std::vector<uint8_t> values(
+                            static_cast<size_t>((merged_length + 7) / 8), 0);
+                        copy_bitmap(dst.bool_bits, old_length, values, 0, false);
+                        for (size_t i = 0; i < workers.size(); ++i) {
+                            const ColumnBuffer& src = workers[i]->columns_[column_index];
+                            copy_bitmap(src.bool_bits, src.length, values, row_bases[i], false);
+                        }
+                        dst.bool_bits = std::move(values);
+                        break;
+                    }
+                    case ColumnType::STRING:
+                    case ColumnType::CATEGORICAL:
+                    case ColumnType::ENTITY_KEY: {
+                        std::vector<int32_t> offsets(static_cast<size_t>(merged_length) + 1, 0);
+                        if (!dst.offsets.empty()) {
+                            std::copy(dst.offsets.begin(), dst.offsets.end(), offsets.begin());
+                        }
+                        std::string string_data;
+                        string_data.resize(merged_string_bytes);
+                        if (!dst.string_data.empty()) {
+                            std::memcpy(string_data.data(), dst.string_data.data(),
+                                        dst.string_data.size());
+                        }
+                        size_t byte_base = dst.string_data.size();
+                        for (size_t i = 0; i < workers.size(); ++i) {
+                            const ColumnBuffer& src = workers[i]->columns_[column_index];
+                            if (!src.string_data.empty()) {
+                                std::memcpy(string_data.data() + byte_base,
+                                            src.string_data.data(), src.string_data.size());
+                            }
+                            const size_t offset_base = static_cast<size_t>(row_bases[i]);
+                            for (size_t o = 1; o < src.offsets.size(); ++o) {
+                                offsets[offset_base + o] =
+                                    static_cast<int32_t>(byte_base) + src.offsets[o];
+                            }
+                            byte_base += src.string_data.size();
+                        }
+                        dst.offsets = std::move(offsets);
+                        dst.string_data = std::move(string_data);
+                        break;
+                    }
+                }
+                dst.length = merged_length;
+                dst.null_count = merged_nulls;
+            }
+        });
+    });
+
+    current_size_ = static_cast<int>(total_rows);
+    for (BatchTransposer* worker : workers) {
+        skipped_count_ += worker->skipped_count_;
+        for (const auto& [code, count] : worker->error_counts_) error_counts_[code] += count;
+        for (const auto& sample : worker->error_samples_) {
+            if (max_error_samples_ <= 0 ||
+                error_samples_.size() >= static_cast<size_t>(max_error_samples_)) {
                 break;
             }
-            case ColumnType::STRING:
-            case ColumnType::CATEGORICAL:
-            case ColumnType::ENTITY_KEY: {
-                int32_t base = static_cast<int32_t>(dst.string_data.size());
-                dst.string_data.append(src.string_data);
-                for (size_t o = 1; o < src.offsets.size(); ++o) {
-                    dst.offsets.push_back(base + src.offsets[o]);
-                }
-                break;
-            }
+            error_samples_.push_back(sample);
         }
-        dst.length += src.length;
-    }
-    current_size_ += other.current_size_;
-    skipped_count_ += other.skipped_count_;
-    for (const auto& [code, count] : other.error_counts_) error_counts_[code] += count;
-    for (const auto& sample : other.error_samples_) {
-        if (max_error_samples_ <= 0 ||
-            error_samples_.size() >= static_cast<size_t>(max_error_samples_)) {
-            break;
-        }
-        error_samples_.push_back(sample);
-    }
-    if (!other.last_error_.empty()) last_error_ = other.last_error_;
-    if (learned_field_order_.empty() && !other.learned_field_order_.empty()) {
-        learned_field_order_ = other.learned_field_order_;
-        learned_field_keys_ = other.learned_field_keys_;
-        layout_is_flat_ = other.layout_is_flat_;
+        if (!worker->last_error_.empty()) last_error_ = worker->last_error_;
     }
 }
 

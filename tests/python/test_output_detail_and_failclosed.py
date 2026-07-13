@@ -98,6 +98,65 @@ class OutputDetailParityTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             result.indices_for_rule("big_amount")
 
+    def test_counts_mode_keeps_only_batch_counts(self):
+        result = _engine(blazerules.OutputDetail.COUNTS).evaluate_messages(RECORDS)
+
+        self.assertEqual(result.n_records, len(RECORDS))
+        self.assertEqual(result.n_matched, 2)
+        self.assertEqual(result.match_counts.get("big_amount"), 1)
+        self.assertEqual(result.match_counts.get("blocked_country"), 1)
+        self.assertEqual(len(result.matched_indices), 0)
+        self.assertEqual(list(result.decisions), [])
+        self.assertEqual(len(result.decision_codes), 0)
+        self.assertEqual(list(result.scores), [])
+        self.assertEqual(list(result.risk_bands), [])
+        self.assertEqual(list(result.winning_rule_ids), [])
+        self.assertEqual(result.grouped_decision_indices(), {})
+        self.assertEqual(result.model_scores, {})
+        with self.assertRaises(KeyError):
+            _ = result["big_amount"]
+
+    def test_codes_mode_materializes_codes_only(self):
+        result = _engine(blazerules.OutputDetail.CODES).evaluate_messages(RECORDS)
+
+        labels = result.decision_label_map
+        decisions = [labels[int(code)] for code in result.decision_codes]
+        self.assertEqual(decisions, ["REVIEW", "BLOCK", "APPROVE"])
+        self.assertEqual(result.n_matched, 2)
+        self.assertEqual(result.match_counts.get("big_amount"), 1)
+        self.assertEqual(result.match_counts.get("blocked_country"), 1)
+        self.assertEqual(len(result.matched_indices), 0)
+        self.assertEqual(list(result.decisions), [])
+        self.assertEqual(list(result.scores), [])
+        self.assertEqual(list(result.risk_bands), [])
+        self.assertEqual(list(result.winning_rule_ids), [])
+        self.assertEqual(result.grouped_decision_indices(), {})
+
+    def test_json_array_direct_path_matches_ndjson(self):
+        array_payload = ("[" + ",".join(RECORDS) + "]").encode()
+        ndjson_payload = ("\n".join(RECORDS) + "\n").encode()
+
+        array_result = _engine(blazerules.OutputDetail.DECISIONS).evaluate_json_array(array_payload)
+        ndjson_result = _engine(blazerules.OutputDetail.DECISIONS).evaluate_ndjson(ndjson_payload)
+
+        self.assertEqual(array_result.n_records, ndjson_result.n_records)
+        self.assertEqual(array_result.n_matched, ndjson_result.n_matched)
+        self.assertEqual(list(array_result.decisions), list(ndjson_result.decisions))
+        self.assertEqual(dict(array_result.match_counts), dict(ndjson_result.match_counts))
+
+    def test_padded_json_array_uses_logical_size(self):
+        logical = ("[" + ",".join(RECORDS) + "]").encode()
+        padded = logical + (b"\0" * 128)
+
+        result = _engine(blazerules.OutputDetail.CODES).evaluate_json_array_padded(
+            padded, len(logical)
+        )
+
+        labels = result.decision_label_map
+        decisions = [labels[int(code)] for code in result.decision_codes]
+        self.assertEqual(decisions, ["REVIEW", "BLOCK", "APPROVE"])
+        self.assertEqual(result.n_matched, 2)
+
 
 class FailClosedLoadTest(unittest.TestCase):
     """Malformed rules must raise, not silently degrade."""

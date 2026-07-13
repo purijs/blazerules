@@ -389,6 +389,8 @@ PYBIND11_MODULE(blazerules, m) {
         .export_values();
 
     py::enum_<EngineConfig::OutputDetail>(m, "OutputDetail")
+        .value("COUNTS", EngineConfig::OUTPUT_COUNTS)
+        .value("CODES", EngineConfig::OUTPUT_CODES)
         .value("DECISIONS", EngineConfig::OUTPUT_DECISIONS)
         .value("BITMASKS", EngineConfig::OUTPUT_BITMASKS)
         .export_values();
@@ -805,6 +807,73 @@ PYBIND11_MODULE(blazerules, m) {
                      {
                          py::gil_scoped_release release;
                          result = e.evaluate_ndjson_padded(bytes);
+                     }
+                     PyBuffer_Release(&view);
+                     return result;
+                 } catch (const BlazeRulesException& exc) {
+                     PyBuffer_Release(&view);
+                     throw_python_blazerules_exception(exc);
+                 } catch (const py::error_already_set&) {
+                     PyBuffer_Release(&view);
+                     throw;
+                 } catch (const std::exception& exc) {
+                     PyBuffer_Release(&view);
+                     throw_python_std_exception(exc, BlazeRulesError::MALFORMED_JSON,
+                                                BlazeRulesError::Domain::INGEST, "ingest");
+                 } catch (...) {
+                     PyBuffer_Release(&view);
+                     throw;
+                 }
+             },
+             py::arg("payload"), py::arg("logical_size"))
+        .def("evaluate_json_array",
+             [](RuleEngine& e, py::object payload) {
+                 Py_buffer view;
+                 if (PyObject_GetBuffer(payload.ptr(), &view, PyBUF_CONTIG_RO) != 0) {
+                     throw py::type_error("evaluate_json_array expects bytes-like contiguous input");
+                 }
+                 std::string_view bytes(static_cast<const char*>(view.buf),
+                                        static_cast<size_t>(view.len));
+                 try {
+                     BatchResult result;
+                     {
+                         py::gil_scoped_release release;
+                         result = e.evaluate_json_array(bytes);
+                     }
+                     PyBuffer_Release(&view);
+                     return result;
+                 } catch (const BlazeRulesException& exc) {
+                     PyBuffer_Release(&view);
+                     throw_python_blazerules_exception(exc);
+                 } catch (const py::error_already_set&) {
+                     PyBuffer_Release(&view);
+                     throw;
+                 } catch (const std::exception& exc) {
+                     PyBuffer_Release(&view);
+                     throw_python_std_exception(exc, BlazeRulesError::MALFORMED_JSON,
+                                                BlazeRulesError::Domain::INGEST, "ingest");
+                 } catch (...) {
+                     PyBuffer_Release(&view);
+                     throw;
+                 }
+             },
+             py::arg("payload"))
+        .def("evaluate_json_array_padded",
+             [](RuleEngine& e, py::object payload, size_t logical_size) {
+                 Py_buffer view;
+                 if (PyObject_GetBuffer(payload.ptr(), &view, PyBUF_CONTIG_RO) != 0) {
+                     throw py::type_error("evaluate_json_array_padded expects bytes-like contiguous input");
+                 }
+                 if (logical_size > static_cast<size_t>(view.len)) {
+                     PyBuffer_Release(&view);
+                     throw py::value_error("logical_size exceeds payload length");
+                 }
+                 std::string_view bytes(static_cast<const char*>(view.buf), logical_size);
+                 try {
+                     BatchResult result;
+                     {
+                         py::gil_scoped_release release;
+                         result = e.evaluate_json_array_padded(bytes);
                      }
                      PyBuffer_Release(&view);
                      return result;

@@ -3,7 +3,9 @@
 #ifdef BLAZERULES_IO_KAFKA
 
 #include <atomic>
+#include <chrono>
 #include <stdexcept>
+#include <thread>
 
 #include <librdkafka/rdkafkacpp.h>
 
@@ -130,10 +132,16 @@ KafkaProducer::~KafkaProducer() {
 
 void KafkaProducer::produce(const std::string& topic, const std::string& value,
                             const std::string& key) {
-    RdKafka::ErrorCode ec = producer_->produce(
-        topic, RdKafka::Topic::PARTITION_UA, RdKafka::Producer::RK_MSG_COPY,
-        const_cast<char*>(value.data()), value.size(),
-        key.empty() ? nullptr : key.data(), key.size(), 0, nullptr);
+    RdKafka::ErrorCode ec = RdKafka::ERR_NO_ERROR;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    do {
+        ec = producer_->produce(
+            topic, RdKafka::Topic::PARTITION_UA, RdKafka::Producer::RK_MSG_COPY,
+            const_cast<char*>(value.data()), value.size(),
+            key.empty() ? nullptr : key.data(), key.size(), 0, nullptr);
+        if (ec != RdKafka::ERR__QUEUE_FULL) break;
+        producer_->poll(10);
+    } while (std::chrono::steady_clock::now() < deadline);
     if (ec != RdKafka::ERR_NO_ERROR) {
         throw std::runtime_error("kafka produce: " + RdKafka::err2str(ec));
     }
