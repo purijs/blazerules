@@ -92,8 +92,13 @@ blazerules stream kafka \
 ```
 
 Supported `eval` inputs are `ndjson`, `jsonl`, `json`, `json-array`, `debezium`,
-`arrow-ipc`, `arrow`, `parquet`, `csv`, `avro`, `protobuf`, and `auto`.
-Top-level JSON arrays use the direct JSON-array evaluator; they do not get
+`arrow-ipc`, `arrow`, `parquet`, `csv`, `avro`, `protobuf`, `protobuf-delimited`,
+and `auto`. `avro` auto-detects a real Object Container File (multi-record,
+self-describing schema, no `--schema` needed) versus a bare single Avro value
+(needs `--schema`); `protobuf-delimited` reads a file of N varint-length-prefixed
+messages (`--descriptor`/`--message` required) since Protobuf has no magic bytes
+to auto-detect that from plain `protobuf`, which still decodes exactly one
+message. Top-level JSON arrays use the direct JSON-array evaluator; they do not get
 minified into NDJSON first. Output
 modes are `none`, `summary`, `decisions-jsonl`, `grouped-decisions`, `rule-counts`,
 `bitmasks`, and `arrow-ipc` (a binary Arrow stream of per-row decisions that
@@ -141,8 +146,8 @@ on-the-wire equivalents of an in-memory `pyarrow.RecordBatch`).
 | Kubernetes logs | Helm chart / DaemonSet file-tail mode | Tail `/var/log/containers/...` and write decisions/DLQ. |
 | Debezium CDC | `blazerules eval --input debezium`, `blazerules_io.unwrap_debezium(...)` | Evaluate database change events. |
 | Arrow IPC | `blazerules eval --input arrow-ipc`, `blazerules_io.ArrowIpcDecoder` | Binary columnar frames. |
-| Avro | `blazerules eval --input avro`, `blazerules_io.AvroDecoder` | Schema-based binary events. |
-| Protobuf | `blazerules eval --input protobuf`, `blazerules_io.ProtobufDecoder` | Descriptor-backed binary events. |
+| Avro | `blazerules eval --input avro`, `blazerules_io.AvroDecoder`, `blazerules_io.decode_avro_ocf_file_each` | Schema-based binary events; Object Container Files decode every record. |
+| Protobuf | `blazerules eval --input protobuf\|protobuf-delimited`, `blazerules_io.ProtobufDecoder.decode_delimited_file_each/_parallel` | Descriptor-backed binary events; delimited files decode every message, optionally in parallel. |
 | S3 / local files | CLI `--path s3://...`, `read_ndjson_bytes(...)`, `read_record_batches(...)` | Offline jobs, backtests, lookup/model/rule loading. |
 
 All paths converge on the same batch evaluation engine. The adapters differ in

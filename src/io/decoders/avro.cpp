@@ -3,6 +3,7 @@
 #ifdef BLAZERULES_IO_AVRO
 
 #include <avro/Compiler.hh>
+#include <avro/DataFile.hh>
 #include <avro/Decoder.hh>
 #include <avro/Encoder.hh>
 #include <avro/Generic.hh>
@@ -10,6 +11,7 @@
 
 #include <arrow/api.h>
 
+#include <cstring>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -279,6 +281,74 @@ std::shared_ptr<arrow::RecordBatch> AvroDecoder::decode_batch(
         arrays.push_back(value_or_throw(builder->Finish(), "finish Avro Arrow array"));
     }
     return arrow::RecordBatch::Make(arrow_schema, rows, std::move(arrays));
+}
+
+bool looks_like_avro_ocf(std::string_view bytes) {
+    static constexpr char kMagic[4] = {'O', 'b', 'j', static_cast<char>(0x01)};
+    return bytes.size() >= sizeof(kMagic) &&
+           std::memcmp(bytes.data(), kMagic, sizeof(kMagic)) == 0;
+}
+
+// No parallel counterpart yet, unlike Protobuf's decode_delimited_file_parallel:
+// DataFileReaderBase's decoder() tracks a single mutable cursor position
+// through the file's block/codec/sync-marker structure (not reentrant), and
+// while DataFileReaderBase does expose seek()/sync()/pastSync() -- the
+// mechanism Hadoop/Spark use to split one OCF file into independent
+// byte-ranges per worker -- its exact semantics need validating against a
+// real multi-block, multi-codec fixture before relying on it (not done here).
+// Until then, this stays sequential; Phase 1's single-threaded decode+eval
+// already accounts for the bulk of the available throughput.
+int64_t decode_avro_ocf_file_each(const std::string& path,
+                                  const RecordBatchVisitor& visitor,
+                                  int64_t batch_size) {
+    if (batch_size <= 0) throw std::runtime_error("decode_avro_ocf_file_each: batch_size must be > 0");
+
+    avro::DataFileReaderBase base(path.c_str());
+    base.init();  // reader schema == the file's own embedded (writer) schema
+
+    const avro::ValidSchema& schema = base.dataSchema();
+    auto arrow_schema = arrow_schema_from_avro_record(schema.root());
+
+    int64_t total_rows = 0;
+    while (base.hasMore()) {
+        std::vector<std::unique_ptr<arrow::ArrayBuilder>> builders;
+        builders.reserve(static_cast<size_t>(arrow_schema->num_fields()));
+        for (const auto& field : arrow_schema->fields()) {
+            builders.push_back(
+                value_or_throw(arrow::MakeBuilder(field->type()), "create Avro Arrow builder"));
+        }
+
+        int64_t rows_in_batch = 0;
+        while (base.hasMore() && rows_in_batch < batch_size) {
+            base.decr();
+            avro::GenericDatum datum(schema);
+            // Static 3-arg form: takes the Decoder& DataFileReaderBase already
+            // manages directly (tracks block/codec/sync-marker position
+            // internally), with an explicit schema -- not the ambiguous 2-arg
+            // static overload, which trusts whatever schema the datum already
+            // has, nor the instance-based GenericReader, which wants a
+            // DecoderPtr (shared_ptr) rather than the plain reference
+            // DataFileReaderBase::decoder() returns.
+            avro::GenericReader::read(base.decoder(), datum, schema);
+
+            const auto& record = datum.value<avro::GenericRecord>();
+            for (size_t i = 0; i < builders.size(); ++i) {
+                append_avro_value(builders[i].get(), record.fieldAt(i));
+            }
+            ++rows_in_batch;
+            ++total_rows;
+        }
+
+        std::vector<std::shared_ptr<arrow::Array>> arrays;
+        arrays.reserve(builders.size());
+        for (auto& builder : builders) {
+            arrays.push_back(value_or_throw(builder->Finish(), "finish Avro Arrow array"));
+        }
+        auto out_batch = arrow::RecordBatch::Make(arrow_schema, rows_in_batch, std::move(arrays));
+        if (!visitor(out_batch)) break;
+    }
+
+    return total_rows;
 }
 
 }  // namespace blazerules_io

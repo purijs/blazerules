@@ -181,21 +181,32 @@ decltype(auto) call_blazerules(F&& f,
 // in-bounds) and UTF-8, so a malformed/corrupt batch is rejected here with a clean
 // exception instead of causing an out-of-bounds read deep in the hot path
 // (e.g. the string-offset fast path in dict_encoder). Runs once per batch, not per row.
+//
+// `validate` defaults to true (unchanged, safe default) so nothing regresses
+// silently. It exists as an opt-in escape hatch for callers who have already
+// validated a batch upstream (or generated it themselves and know it's
+// well-formed) and want to match the CLI's own cheaper defaults for the
+// SAME underlying data -- the CLI's arrow-ipc path uses STRUCTURAL (not
+// FULL) validation, and its Parquet/CSV paths use no validation at all
+// (file_reader.cpp's TRUSTED level) -- this was previously a real, un-opt-
+// outable extra cost unique to the Python path for otherwise-identical work.
 std::shared_ptr<arrow::RecordBatch> validate_imported_batch(
-        arrow::Result<std::shared_ptr<arrow::RecordBatch>> imported) {
+        arrow::Result<std::shared_ptr<arrow::RecordBatch>> imported, bool validate) {
     if (!imported.ok()) {
         throw std::runtime_error("failed to import Arrow record batch: " +
                                  imported.status().ToString());
     }
     std::shared_ptr<arrow::RecordBatch> batch = imported.MoveValueUnsafe();
-    arrow::Status status = batch->ValidateFull();
-    if (!status.ok()) {
-        throw std::runtime_error("invalid Arrow record batch: " + status.ToString());
+    if (validate) {
+        arrow::Status status = batch->ValidateFull();
+        if (!status.ok()) {
+            throw std::runtime_error("invalid Arrow record batch: " + status.ToString());
+        }
     }
     return batch;
 }
 
-std::shared_ptr<arrow::RecordBatch> import_record_batch(py::object batch) {
+std::shared_ptr<arrow::RecordBatch> import_record_batch(py::object batch, bool validate = true) {
     if (py::hasattr(batch, "__arrow_c_array__")) {
         py::object exported = batch.attr("__arrow_c_array__")();
         py::tuple pair = py::reinterpret_borrow<py::tuple>(exported);
@@ -203,14 +214,14 @@ std::shared_ptr<arrow::RecordBatch> import_record_batch(py::object batch) {
             PyCapsule_GetPointer(pair[0].ptr(), "arrow_schema"));
         auto* c_array = reinterpret_cast<ArrowArray*>(
             PyCapsule_GetPointer(pair[1].ptr(), "arrow_array"));
-        return validate_imported_batch(arrow::ImportRecordBatch(c_array, c_schema));
+        return validate_imported_batch(arrow::ImportRecordBatch(c_array, c_schema), validate);
     }
 
     ArrowArray c_array;
     ArrowSchema c_schema;
     batch.attr("_export_to_c")(reinterpret_cast<uintptr_t>(&c_array),
                                reinterpret_cast<uintptr_t>(&c_schema));
-    return validate_imported_batch(arrow::ImportRecordBatch(&c_array, &c_schema));
+    return validate_imported_batch(arrow::ImportRecordBatch(&c_array, &c_schema), validate);
 }
 
 py::array_t<bool> bitmask_to_bool(const std::vector<uint8_t>& bm, int n) {
@@ -425,13 +436,28 @@ PYBIND11_MODULE(blazerules, m) {
           },
           py::arg("name"), py::arg("type"), py::arg("nullable") = true);
 
+    // Previously unbound: trace_sample_rate was settable from Python but had
+    // no effect without this -- RuleEngine only samples/traces when
+    // trace_mode != TRACE_NONE.
+    py::enum_<EngineConfig::TraceMode>(m, "TraceMode")
+        .value("TRACE_NONE", EngineConfig::TRACE_NONE)
+        .value("TRACE_SAMPLED", EngineConfig::TRACE_SAMPLED)
+        .value("TRACE_ALL", EngineConfig::TRACE_ALL);
+
     py::class_<EngineConfig>(m, "EngineConfig")
         .def(py::init<>())
         .def_readwrite("batch_size", &EngineConfig::batch_size)
         .def_readwrite("parallel_threshold", &EngineConfig::parallel_threshold)
         .def_readwrite("eval_thread_count", &EngineConfig::eval_thread_count)
         .def_readwrite("model_intra_op_threads", &EngineConfig::model_intra_op_threads)
+        .def_readwrite("trace_mode", &EngineConfig::trace_mode)
         .def_readwrite("trace_sample_rate", &EngineConfig::trace_sample_rate)
+        .def_property("eviction_sweep_interval_minutes",
+                     [](const EngineConfig& c) { return c.eviction_sweep_interval.count(); },
+                     [](EngineConfig& c, int64_t minutes) {
+                         c.eviction_sweep_interval = std::chrono::minutes(minutes);
+                     },
+                     "Periodic window/state eviction cadence, in minutes (default 5).")
         .def_readwrite("output_detail", &EngineConfig::output_detail)
         .def_readwrite("max_window_entities", &EngineConfig::max_window_entities)
         .def_readwrite("arena_size_bytes", &EngineConfig::arena_size_bytes)
@@ -661,6 +687,14 @@ PYBIND11_MODULE(blazerules, m) {
         .def_readonly("last_error_code", &HotReloadStatus::last_error_code)
         .def_readonly("last_error_message", &HotReloadStatus::last_error_message);
 
+    // Previously unbound entirely -- RuleEngine::stats() existed in C++ with
+    // no Python access at all (only the separate, opt-in metrics_snapshot()
+    // system was exposed).
+    py::class_<EngineStats>(m, "EngineStats")
+        .def_readonly("batches_evaluated", &EngineStats::batches_evaluated)
+        .def_readonly("records_evaluated", &EngineStats::records_evaluated)
+        .def_readonly("records_skipped", &EngineStats::records_skipped);
+
     py::enum_<RuleEngine::SchemaState>(m, "SchemaState")
         .value("UNBOUND", RuleEngine::SchemaState::UNBOUND)
         .value("INFERRED_BOUND", RuleEngine::SchemaState::INFERRED_BOUND)
@@ -739,6 +773,10 @@ PYBIND11_MODULE(blazerules, m) {
              py::arg("rules_path"), py::arg("poll_interval_seconds") = 5)
         .def("stop_hot_reload", &RuleEngine::stop_hot_reload)
         .def("hot_reload_status", &RuleEngine::hot_reload_status)
+        .def("stats", &RuleEngine::stats,
+             "Cheap, always-on counters (batches/records evaluated, records "
+             "skipped) -- distinct from the opt-in metrics_snapshot() system, "
+             "which needs enable_metrics() first.")
         .def_property_readonly("schema_bound", &RuleEngine::schema_bound)
         .def_property_readonly("schema_state", &RuleEngine::schema_state)
         .def_property_readonly("schema",
@@ -894,8 +932,8 @@ PYBIND11_MODULE(blazerules, m) {
              },
              py::arg("payload"), py::arg("logical_size"))
         .def("evaluate_batch",
-             [](RuleEngine& e, py::object batch) {
-                 auto rb = import_record_batch(batch);
+             [](RuleEngine& e, py::object batch, bool validate) {
+                 auto rb = import_record_batch(batch, validate);
                  try {
                      py::gil_scoped_release release;
                      return e.evaluate_record_batch(rb);
@@ -906,7 +944,11 @@ PYBIND11_MODULE(blazerules, m) {
                                                 BlazeRulesError::Domain::ARROW, "arrow");
                  }
              },
-             py::arg("batch"))
+             py::arg("batch"), py::arg("validate") = true,
+             "validate=False skips the full ValidateFull() scan on the imported "
+             "batch (matching the CLI's cheaper STRUCTURAL/TRUSTED defaults for "
+             "arrow-ipc/parquet/csv) -- only for batches you've already validated "
+             "or generated yourself; default stays fully validated.")
         .def("create_shards",
              [](const RuleEngine& e, int shard_count) {
                  py::list out;
@@ -965,8 +1007,8 @@ PYBIND11_MODULE(blazerules, m) {
              },
              py::arg("partition_id"), py::arg("payload"), py::arg("logical_size"))
         .def("evaluate_partition_batch",
-             [](RuleEngine& e, int partition_id, py::object batch) {
-                 auto rb = import_record_batch(batch);
+             [](RuleEngine& e, int partition_id, py::object batch, bool validate) {
+                 auto rb = import_record_batch(batch, validate);
                  try {
                      py::gil_scoped_release release;
                      return e.evaluate_partition(partition_id, rb);
@@ -977,7 +1019,7 @@ PYBIND11_MODULE(blazerules, m) {
                                                 BlazeRulesError::Domain::ARROW, "arrow");
                  }
              },
-             py::arg("partition_id"), py::arg("batch"))
+             py::arg("partition_id"), py::arg("batch"), py::arg("validate") = true)
         .def("backtest",
              [](RuleEngine& e, py::object parquet_path, std::string rules_a,
                 std::string rules_b, py::object label_column) {

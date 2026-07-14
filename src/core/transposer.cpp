@@ -18,7 +18,8 @@
 
 namespace {
 
-constexpr size_t kParallelJsonThresholdBytes = 8 * 1024 * 1024;
+// kParallelJsonThresholdBytes now lives in transposer.h (exported so callers
+// like the CLI can size their own streaming chunks against the same value).
 
 int default_thread_count() {
     unsigned int hw = std::thread::hardware_concurrency();

@@ -6,6 +6,7 @@
 #include <csignal>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -116,6 +117,11 @@ bool looks_json_object(std::string_view s) {
     return t.size() >= 2 && t.front() == '{' && t.back() == '}';
 }
 
+bool looks_json_array(std::string_view s) {
+    std::string t = trim(s);
+    return t.size() >= 2 && t.front() == '[' && t.back() == ']';
+}
+
 std::optional<size_t> json_value_pos(std::string_view line, std::string_view key) {
     std::string marker = "\"" + std::string(key) + "\"";
     size_t p = line.find(marker);
@@ -183,6 +189,29 @@ bool is_ndjson_content_type(std::string_view content_type) {
     return ct.find("application/x-ndjson") != std::string::npos ||
            ct.find("application/ndjson") != std::string::npos ||
            ct.find("application/jsonl") != std::string::npos;
+}
+
+bool is_avro_content_type(std::string_view content_type) {
+    std::string ct = lower_ascii(content_type);
+    return ct.find("avro/binary") != std::string::npos ||
+           ct.find("application/avro") != std::string::npos ||
+           ct.find("application/vnd.apache.avro") != std::string::npos;
+}
+
+bool is_protobuf_content_type(std::string_view content_type) {
+    std::string ct = lower_ascii(content_type);
+    return ct.find("application/x-protobuf") != std::string::npos ||
+           ct.find("application/protobuf") != std::string::npos ||
+           ct.find("application/vnd.google.protobuf") != std::string::npos;
+}
+
+// Same magic bytes as blazerules_io::looks_like_avro_ocf, inlined here so this
+// binary doesn't need to link the Avro decoder (which may not even be built
+// in) just to sniff 4 bytes and reject cleanly.
+bool body_looks_like_avro_ocf(std::string_view body) {
+    static constexpr char kMagic[4] = {'O', 'b', 'j', static_cast<char>(0x01)};
+    return body.size() >= sizeof(kMagic) &&
+           std::memcmp(body.data(), kMagic, sizeof(kMagic)) == 0;
 }
 
 std::string status_message(const arrow::Status& status, std::string_view context) {
@@ -742,13 +771,22 @@ private:
     }
 
     void submit_lines(const std::vector<std::string>& lines) {
-        uint64_t bytes_in = 0;
-        for (const auto& line : lines) bytes_in += line.size() + 1;
-        input_bytes_.fetch_add(bytes_in, std::memory_order_relaxed);
-        input_records_.fetch_add(lines.size(), std::memory_order_relaxed);
         std::vector<std::string> records;
         records.reserve(lines.size());
         for (const auto& line : lines) {
+            if (looks_json_array(line)) {
+                // Flush whatever's pending first so decision order still
+                // matches input order, then handle the array line on its own
+                // (it may expand into many records, not the usual one).
+                if (!records.empty()) {
+                    evaluate(records);
+                    records.clear();
+                }
+                evaluate_json_array_line(line);
+                continue;
+            }
+            input_bytes_.fetch_add(line.size() + 1, std::memory_order_relaxed);
+            input_records_.fetch_add(1, std::memory_order_relaxed);
             std::string rec = canonicalize(line);
             if (dedupe_.duplicate(rec)) continue;
             records.push_back(std::move(rec));
@@ -817,6 +855,34 @@ private:
         maybe_init_pool();
     }
 
+    // A stdin/file-tail line that's a JSON array (e.g. `[{...},{...}]`) used
+    // to fail looks_json_object (leading '{') and get wrapped whole as one
+    // opaque escaped-string `message` field instead of being parsed into its
+    // real N records -- the same "one ingestion unit, many actual records"
+    // gap as the HTTP path already handles correctly via json_array
+    // sniffing. Routes it through evaluate_json_array_padded instead.
+    void evaluate_json_array_line(std::string_view line) {
+        std::string padded(line);
+        const size_t original_size = padded.size();
+        padded.resize(padded.size() + simdjson::SIMDJSON_PADDING, '\0');
+        bool pooled = false;
+        RuleEngine* e = acquire_engine(pooled);
+        BatchResult result;
+        try {
+            result = e->evaluate_json_array_padded(std::string_view(padded.data(), original_size));
+        } catch (...) {
+            release_engine(e, pooled);
+            throw;
+        }
+        release_engine(e, pooled);
+        input_bytes_.fetch_add(original_size, std::memory_order_relaxed);
+        input_records_.fetch_add(static_cast<uint64_t>(result.messages_processed),
+                                 std::memory_order_relaxed);
+        write_decisions(result);
+        write_input_stats();
+        maybe_init_pool();
+    }
+
     void evaluate_body(const std::string& body) {
         uint64_t records = 0;
         for (char c : body) if (c == '\n') ++records;
@@ -862,7 +928,17 @@ private:
     std::vector<BatchResult> evaluate_http_task(const std::shared_ptr<HttpTask>& task) {
         std::vector<BatchResult> results;
         const std::string_view body(task->body.data(), task->payload_size);
-        if (is_arrow_ipc_content_type(task->content_type)) {
+        if (is_avro_content_type(task->content_type) || is_protobuf_content_type(task->content_type) ||
+            body_looks_like_avro_ocf(body)) {
+            // Reject cleanly instead of falling through to the raw-text path
+            // below, which splits on '\n' BYTES -- for binary Avro/Protobuf
+            // data that occurs at arbitrary offsets, silently mangling the
+            // payload into meaningless string fields rather than erroring.
+            throw std::runtime_error(
+                "this agent's HTTP endpoint does not decode Avro/Protobuf payloads -- "
+                "send NDJSON, JSON-array, or Arrow IPC instead (Content-Type: '" +
+                task->content_type + "')");
+        } else if (is_arrow_ipc_content_type(task->content_type)) {
             input_bytes_.fetch_add(body.size(), std::memory_order_relaxed);
             uint64_t records = for_each_arrow_ipc_batch(
                 body, [&](const std::shared_ptr<arrow::RecordBatch>& batch) {

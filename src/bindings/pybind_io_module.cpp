@@ -356,7 +356,39 @@ PYBIND11_MODULE(blazerules_io, m) {
                  return py::bytes(out);
              },
              py::arg("frames"),
-             "Decode binary protobuf frames to NDJSON using a serialized FileDescriptorSet.");
+             "Decode binary protobuf frames to NDJSON using a serialized FileDescriptorSet.")
+        .def("decode_delimited_file_each",
+             [](const blazerules_io::ProtobufDecoder& d, const std::string& path,
+                py::function callback, int64_t batch_size) {
+                 py::gil_scoped_release release;
+                 return d.decode_delimited_file_each(path, [&](const auto& batch) {
+                     py::gil_scoped_acquire acquire;
+                     py::object result = callback(record_batch_to_pyarrow(batch));
+                     return result.is_none() || result.cast<bool>();
+                 }, batch_size);
+             },
+             py::arg("path"), py::arg("callback"), py::arg("batch_size") = 10000,
+             "Read a file of N varint-length-delimited Protobuf messages (the "
+             "SerializeDelimitedToCodedStream convention), invoking callback once "
+             "per batch of up to batch_size records as a pyarrow.RecordBatch. "
+             "Gives the CLI's --input protobuf-delimited the identical capability.")
+        .def("decode_delimited_file_parallel",
+             [](const blazerules_io::ProtobufDecoder& d, const std::string& path,
+                py::function callback, int64_t batch_size, int worker_count) {
+                 py::gil_scoped_release release;
+                 return d.decode_delimited_file_parallel(path, [&](const auto& batch) {
+                     py::gil_scoped_acquire acquire;
+                     py::object result = callback(record_batch_to_pyarrow(batch));
+                     return result.is_none() || result.cast<bool>();
+                 }, batch_size, worker_count);
+             },
+             py::arg("path"), py::arg("callback"), py::arg("batch_size") = 10000,
+             py::arg("worker_count") = 1,
+             "Same as decode_delimited_file_each, but parses batch_size-sized "
+             "chunks concurrently across worker_count threads (evaluation/output "
+             "order is unaffected -- only the CPU-heavy parse step is parallel). "
+             "Gives the CLI's --threads on --input protobuf-delimited the "
+             "identical capability.");
     m.attr("has_protobuf") = true;
 #else
     m.attr("has_protobuf") = false;
@@ -388,6 +420,30 @@ PYBIND11_MODULE(blazerules_io, m) {
                  return py::bytes(out);
              },
              py::arg("frames"));
+
+    m.def("looks_like_avro_ocf",
+          [](py::bytes data) {
+              std::string s = data;
+              return blazerules_io::looks_like_avro_ocf(s);
+          },
+          py::arg("data"),
+          "True if data starts with the Avro Object Container File magic bytes "
+          "(\"Obj\\x01\") -- safe to auto-detect, unlike Protobuf framing.");
+    m.def("decode_avro_ocf_file_each",
+          [](const std::string& path, py::function callback, int64_t batch_size) {
+              py::gil_scoped_release release;
+              return blazerules_io::decode_avro_ocf_file_each(path, [&](const auto& batch) {
+                  py::gil_scoped_acquire acquire;
+                  py::object result = callback(record_batch_to_pyarrow(batch));
+                  return result.is_none() || result.cast<bool>();
+              }, batch_size);
+          },
+          py::arg("path"), py::arg("callback"), py::arg("batch_size") = 10000,
+          "Read a real multi-record Avro Object Container File (the format "
+          "Spark/Hadoop/Kafka Connect produce) using its own embedded schema -- "
+          "no AvroDecoder/--schema needed -- invoking callback once per batch of "
+          "up to batch_size records as a pyarrow.RecordBatch. Gives the CLI's "
+          "--input avro (when the file is OCF-framed) the identical capability.");
     m.attr("has_avro") = true;
 #else
     m.attr("has_avro") = false;

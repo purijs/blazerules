@@ -14,6 +14,14 @@
 #include "kernel_sequence.h"
 #include "schema.h"
 
+// Byte threshold above which add_ndjson/add_ndjson_padded's internal TBB
+// fan-out (split_ndjson) actually splits a single call's buffer into more
+// than one parallel chunk. Exposed so a caller sizing its OWN outer
+// streaming chunks (e.g. the CLI's --input ndjson file reader) can compute a
+// chunk size that reaches its configured thread count, rather than
+// inadvertently capping internal parallelism with an undersized chunk.
+constexpr size_t kParallelJsonThresholdBytes = 8 * 1024 * 1024;
+
 class BatchTransposer {
 public:
     explicit BatchTransposer(const BlazeRulesSchema& schema,

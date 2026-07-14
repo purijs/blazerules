@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <vector>
 
 #include <yaml-cpp/yaml.h>
@@ -22,6 +23,7 @@
 #include "blazerules/engine.h"
 #include "blazerules/resource_resolver.h"
 #include "blazerules/simd_kernels.h"
+#include "blazerules/transposer.h"
 #include "blazerules/version.h"
 #include "blazerules_io/cdc.h"
 #include "blazerules_io/decoder.h"
@@ -635,6 +637,23 @@ EvalTotals evaluate_ndjson(RuleEngine& engine, std::string_view bytes,
     return totals;
 }
 
+// mmaps the whole file zero-copy and hands it to evaluate_ndjson_padded in
+// one call, instead of the default streaming reader's bounded-memory chunks
+// -- gets the internal TBB fan-out's full width in one shot (no risk of an
+// undersized outer chunk capping it) at the cost of the whole file being
+// mapped at once. Opt-in via --mmap; not the default since it trades away
+// the streaming reader's bounded memory footprint for large files.
+EvalTotals evaluate_ndjson_file(RuleEngine& engine, const std::string& path,
+                                const std::string& output, std::ostream& out) {
+    EvalTotals totals;
+    totals.collect_rows = (output == "arrow-ipc");
+    BatchResult result = engine.evaluate_ndjson_file(path);
+    if (output == "decisions-jsonl") write_decisions_jsonl(result, 0, out);
+    if (output == "bitmasks") write_bitmasks(result, 0, out);
+    add_result(totals, result, 0);
+    return totals;
+}
+
 EvalTotals evaluate_json_array(RuleEngine& engine, std::string_view bytes,
                                const std::string& output, std::ostream& out) {
     EvalTotals totals;
@@ -691,17 +710,32 @@ int command_eval(Options opts) {
         std::cout
             << "Usage: blazerules eval --rules rules.yaml --input FORMAT --path DATA [flags]\n\n"
             << "Inputs:\n"
-            << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv, avro, protobuf, auto\n\n"
+            << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv,\n"
+            << "  avro, protobuf, protobuf-delimited, auto\n\n"
             << "Output modes:\n"
             << "  none, summary, decisions-jsonl, grouped-decisions, rule-counts, bitmasks, arrow-ipc\n\n"
             << "Format-specific flags:\n"
-            << "  --schema PATH                 Avro schema JSON\n"
+            << "  --schema PATH                 Avro schema JSON (only for a bare/non-OCF avro file;\n"
+            << "                                 an Avro Object Container File carries its own schema)\n"
             << "  --descriptor PATH             Protobuf FileDescriptorSet\n"
             << "  --message TYPE                Protobuf message type\n"
             << "  --op-field FIELD              Debezium operation field, default __op\n\n"
+            << "Notes:\n"
+            << "  avro               Reads a real Object Container File (multi-record, self-describing\n"
+            << "                     schema) when the file has OCF magic bytes; otherwise falls back to\n"
+            << "                     decoding one bare Avro-encoded value (needs --schema).\n"
+            << "  protobuf-delimited Reads a file of N varint-length-prefixed Protobuf messages\n"
+            << "                     (SerializeDelimitedToCodedStream's convention). Not auto-detected\n"
+            << "                     from plain --input protobuf -- Protobuf has no magic bytes, so a\n"
+            << "                     delimited file can't be safely told apart from a single-message one.\n\n"
             << "Runtime flags:\n"
             << "  --config PATH                 Load a unified run config (flags override it)\n"
             << "  --batch-size N --threads N --model name=PATH --output-path PATH\n"
+            << "  --mmap                         ndjson/jsonl local files only: mmap the whole file\n"
+            << "                                 zero-copy instead of streaming bounded chunks. Faster\n"
+            << "                                 for large files with --threads > 2 (the default\n"
+            << "                                 streaming chunk size is memory-bounded, not width-\n"
+            << "                                 unbounded); trades away that memory bound.\n"
             << "  --output-detail counts|codes|decisions|bitmasks --ingest-error-mode M --type-mismatch-mode M\n"
             << "  --decision-log PATH --dead-letter-log PATH --simd-backend auto|scalar|neon|avx2|avx512\n";
         return 0;
@@ -736,14 +770,28 @@ int command_eval(Options opts) {
         } else {
             totals = evaluate_ndjson(engine, bytes, output, out);
         }
+    } else if ((input == "ndjson" || input == "jsonl") && truthy(opts, "mmap", false) &&
+               path.rfind("s3://", 0) != 0) {
+        totals = evaluate_ndjson_file(engine, path, output, out);
     } else if (input == "ndjson" || input == "jsonl") {
         totals.collect_rows = (output == "arrow-ipc");
         int32_t row_offset = 0;
         int batch_index = 0;
         blazerules_io::FileReadOptions read_options;
         read_options.batch_size = config.batch_size;
+        // Size the outer streaming chunk so add_ndjson_padded's internal TBB
+        // fan-out (gated on kParallelJsonThresholdBytes per call) can actually
+        // reach the configured thread count -- previously this was
+        // batch_size*1024 bytes only (~9.77MB at the default batch_size),
+        // just above the 8MB threshold, which capped every chunk at ~2-way
+        // internal parallelism regardless of --threads or core count.
+        const int effective_threads = config.eval_thread_count > 0
+            ? config.eval_thread_count
+            : std::max<int>(1, static_cast<int>(std::thread::hardware_concurrency()));
         read_options.ndjson_chunk_bytes = std::max<int64_t>(
-            1 << 20, static_cast<int64_t>(config.batch_size) * 1024);
+            static_cast<int64_t>(config.batch_size) * 1024,
+            static_cast<int64_t>(effective_threads) *
+                static_cast<int64_t>(kParallelJsonThresholdBytes));
         blazerules_io::for_each_ndjson_chunk(path, [&](std::string_view chunk) {
             evaluate_ndjson_into(engine, chunk, output, out, totals, row_offset, batch_index);
             return true;
@@ -783,12 +831,40 @@ int command_eval(Options opts) {
         }, read_options);
     } else if (input == "avro") {
 #ifdef BLAZERULES_IO_AVRO
-        const std::string schema_path = get(opts, "schema");
-        if (schema_path.empty()) throw CliError("--schema is required for Avro input");
-        blazerules_io::AvroDecoder decoder(read_file_bytes(schema_path));
-        std::string bytes = read_file_bytes(path);
-        auto batch = decoder.decode_batch(one_frame_view(bytes));
-        totals = evaluate_batches(engine, {batch}, output, out);
+        const std::string local_path = blazerules::resolve_resource_to_local(path);
+        char magic[4] = {};
+        {
+            std::ifstream peek(local_path, std::ios::binary);
+            if (!peek) throw CliError("failed to open file: " + path);
+            peek.read(magic, sizeof(magic));
+        }
+        const bool is_ocf = blazerules_io::looks_like_avro_ocf(std::string_view(magic, sizeof(magic)));
+
+        if (is_ocf) {
+            // Real multi-record Avro Object Container File (what
+            // Spark/Hadoop/Kafka Connect produce): uses the file's own
+            // embedded schema, so --schema is not required for this path.
+            totals.collect_rows = (output == "arrow-ipc");
+            int32_t row_offset = 0;
+            int batch_index = 0;
+            blazerules_io::decode_avro_ocf_file_each(local_path, [&](const auto& batch) {
+                evaluate_batch_into(engine, batch, output, out, totals, row_offset, batch_index);
+                return true;
+            }, config.batch_size);
+        } else {
+            // Bare single Avro-encoded value (e.g. one Kafka message
+            // payload, no container framing) -- requires --schema, decodes
+            // exactly one record.
+            const std::string schema_path = get(opts, "schema");
+            if (schema_path.empty()) {
+                throw CliError("--schema is required for Avro input "
+                                "(not needed for an Avro Object Container File)");
+            }
+            blazerules_io::AvroDecoder decoder(read_file_bytes(schema_path));
+            std::string bytes = read_file_bytes(path);
+            auto batch = decoder.decode_batch(one_frame_view(bytes));
+            totals = evaluate_batches(engine, {batch}, output, out);
+        }
 #else
         throw CliError("this build does not include Avro support");
 #endif
@@ -802,6 +878,41 @@ int command_eval(Options opts) {
         std::string bytes = read_file_bytes(path);
         auto batch = decoder.decode_batch(one_frame_view(bytes));
         totals = evaluate_batches(engine, {batch}, output, out);
+#else
+        throw CliError("this build does not include Protobuf support");
+#endif
+    } else if (input == "protobuf-delimited") {
+#ifdef BLAZERULES_IO_PROTOBUF
+        // A real multi-message file: each message is prefixed with its
+        // varint-encoded length (the same convention protobuf's own
+        // SerializeDelimitedToCodedStream/ParseDelimitedFromCodedStream use).
+        // Deliberately a separate --input value, not folded into "protobuf" --
+        // protobuf has no magic bytes, so a delimited file is indistinguishable
+        // from a bare single-message file by content alone; auto-detecting
+        // would risk misreading someone's existing single-message file.
+        const std::string descriptor = get(opts, "descriptor");
+        const std::string message = get(opts, "message");
+        if (descriptor.empty()) throw CliError("--descriptor is required for Protobuf input");
+        if (message.empty()) throw CliError("--message is required for Protobuf input");
+        const std::string local_path = blazerules::resolve_resource_to_local(path);
+        blazerules_io::ProtobufDecoder decoder(read_file_bytes(descriptor), message);
+        totals.collect_rows = (output == "arrow-ipc");
+        int32_t row_offset = 0;
+        int batch_index = 0;
+        auto handle_batch = [&](const auto& batch) {
+            evaluate_batch_into(engine, batch, output, out, totals, row_offset, batch_index);
+            return true;
+        };
+        // --threads parallelizes the CPU-heavy protobuf parse step across
+        // chunks (decode_batch is reentrant/stateless); evaluation stays
+        // sequential on this one engine either way, so output order and
+        // aggregation are unaffected by the flag.
+        if (config.eval_thread_count > 1) {
+            decoder.decode_delimited_file_parallel(local_path, handle_batch, config.batch_size,
+                                                   config.eval_thread_count);
+        } else {
+            decoder.decode_delimited_file_each(local_path, handle_batch, config.batch_size);
+        }
 #else
         throw CliError("this build does not include Protobuf support");
 #endif
@@ -987,7 +1098,8 @@ void print_help() {
         << "  blazerules backtest --rules-a old.yaml --rules-b new.yaml --path data.parquet\n"
         << "  blazerules stream kafka --rules rules.yaml --brokers HOST --input-topic TOPIC\n\n"
         << "Eval inputs:\n"
-        << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv, avro, protobuf, auto\n\n"
+        << "  ndjson, jsonl, json, json-array, debezium, arrow-ipc, arrow, parquet, csv,\n"
+        << "  avro, protobuf, protobuf-delimited, auto\n\n"
         << "Common flags:\n"
         << "  --rules PATH|s3://...        Rules YAML\n"
         << "  --path PATH|s3://...         Input file\n"
