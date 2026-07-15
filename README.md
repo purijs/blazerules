@@ -1,6 +1,6 @@
 # BlazeRules
 
-[![Docs](https://img.shields.io/badge/docs-readme.io-2563eb)](https://blazerules.readme.io/docs/getting-started)
+[![Docs](https://img.shields.io/badge/docs-docs.blazerules.dev-2563eb)](https://docs.blazerules.dev/docs/getting-started)
 [![GitHub](https://img.shields.io/badge/github-purijs%2Fblazerules-111827?logo=github)](https://github.com/purijs/blazerules)
 ![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)
 ![Python](https://img.shields.io/badge/python-pybind11-3776AB?logo=python)
@@ -13,7 +13,7 @@ from HTTP, stdin, file tails, Kafka, Arrow, Avro, Protobuf, S3, or local files.
 
 Website: [https://blazerules.dev/](https://blazerules.dev/)
 
-Documentation: [blazerules.readme.io](https://blazerules.readme.io/docs/getting-started)
+Documentation: [docs.blazerules.dev](https://docs.blazerules.dev/docs/getting-started)
 
 License: Apache-2.0.
 
@@ -21,7 +21,7 @@ The engine is batch-first internally. Ingestion adapters collect events into
 microbatches, infer or bind a schema, evaluate rules, and emit compact decisions
 or dead-letter records.
 
-![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.png)
+![BlazeRules dashboard overview](https://raw.githubusercontent.com/purijs/blazerules/main/assets/dashboard-overview.gif)
 
 ## Install
 
@@ -58,8 +58,8 @@ arm64 uses the NEON backend.
 
 ## Native CLI
 
-Use `blazerules` when you want the same engine and IO stack without writing
-Python:
+The `blazerules` CLI exposes the same engine and IO stack without requiring
+Python integration:
 
 ```bash
 blazerules info
@@ -115,7 +115,7 @@ librdkafka settings such as SASL/SSL. Malformed records in an NDJSON stream are
 skipped and counted by default; set `ingest_error_mode=HARD_FAIL` when a stream
 should stop on the first bad record.
 
-### Interfaces at a glance
+### Interface summary
 
 | Surface | What it is | Entry points |
 | --- | --- | --- |
@@ -173,8 +173,8 @@ print(result.match_counts)
 ```
 
 Rules can be loaded before a schema exists. The first evaluated batch samples
-rule-referenced fields and binds the inferred schema. You can still pass an
-explicit schema when you need strict control.
+rule-referenced fields and binds the inferred schema. An explicit schema remains
+available for strict type control.
 
 ## Local Agent For Logs And HTTP Events
 
@@ -342,8 +342,8 @@ benchmark output, and rule summaries.
 
 The dashboard has pages for the decision stream (Overview, Event Timeline), per-rule
 fire rates, a ruleset visualizer, and a **Models** page. A **Ruleset** selector in
-the header scopes every page to one instance/ruleset or *All* — so with a
-multi-instance agent you can compare rulesets side by side (an A/B view). The Models
+the header scopes every page to one instance/ruleset or *All*. A multi-instance
+agent can therefore compare rulesets side by side. The Models
 page shows, per registered model, a prediction-distribution histogram (probabilities
 for classification, values for regression) plus a filterable per-record prediction
 table, and scales to any number of models. An **Instances / Rulesets** panel on the
@@ -398,31 +398,31 @@ Flags on both binaries: `--aws-region REGION` and `--aws-endpoint-url URL`
 (otherwise read from `AWS_REGION`/`AWS_ENDPOINT_URL`). Agent roll controls:
 `--s3-roll-mb` (part size cap, default 64) and `--s3-flush-seconds` (roll + upload
 cadence, default 10). On `SIGINT`/`SIGTERM` the agent flushes its final part before
-exiting, so a rolling deploy loses nothing. Dead-letter output stays a local
-NDJSON file — mirror it separately if you need it centralized.
+exiting, so a rolling deploy loses nothing. Dead-letter output remains a local
+NDJSON file and requires separate replication for centralized retention.
 
 ## Documentation
 
 Start here:
 
-- [Quickstart](https://blazerules.readme.io/docs/quickstart)
-- [Ingestion Overview](https://blazerules.readme.io/docs/ingestion-overview)
-- [HTTP Logs Recipe](https://blazerules.readme.io/docs/http-log-ingestion)
-- [stdin Recipe](https://blazerules.readme.io/docs/stdin-log-ingestion)
-- [File Tail Recipe](https://blazerules.readme.io/docs/file-tail-ingestion)
-- [Plain Text Logs Recipe](https://blazerules.readme.io/docs/plain-text-log-ingestion)
-- [Kubernetes Logs Recipe](https://blazerules.readme.io/docs/kubernetes-log-ingestion)
-- [DLQ Recipe](https://blazerules.readme.io/docs/decision-and-dlq-logs)
-- [Python API](https://blazerules.readme.io/docs/python-api)
-- [API and CLI Values Reference](https://blazerules.readme.io/docs/api-cli-values-reference)
-- [Production YAML Guide](https://blazerules.readme.io/docs/production-yaml-guide)
-- [Build, C++ And Platforms](https://blazerules.readme.io/docs/build-cpp-platforms)
+- [Quickstart](https://docs.blazerules.dev/docs/quickstart)
+- [Ingestion Overview](https://docs.blazerules.dev/docs/ingestion-overview)
+- [HTTP Logs Recipe](https://docs.blazerules.dev/docs/http-log-ingestion)
+- [stdin Recipe](https://docs.blazerules.dev/docs/stdin-log-ingestion)
+- [File Tail Recipe](https://docs.blazerules.dev/docs/file-tail-ingestion)
+- [Plain Text Logs Recipe](https://docs.blazerules.dev/docs/plain-text-log-ingestion)
+- [Kubernetes Logs Recipe](https://docs.blazerules.dev/docs/kubernetes-log-ingestion)
+- [DLQ Recipe](https://docs.blazerules.dev/docs/decision-and-dlq-logs)
+- [Python API](https://docs.blazerules.dev/docs/python-api)
+- [API and CLI Values Reference](https://docs.blazerules.dev/docs/api-cli-values-reference)
+- [Production YAML Guide](https://docs.blazerules.dev/docs/production-yaml-guide)
+- [Build, C++ And Platforms](https://docs.blazerules.dev/docs/build-cpp-platforms)
 
 ## Build From Source
 
-Most users start with `pip install blazerules`. Build from source when you need
-to change native flags, embed the C++ library directly, or produce your own
-platform image.
+The standard installation path is `pip install blazerules`. Source builds are
+intended for custom native flags, direct C++ embedding, or platform-specific
+images.
 
 ```bash
 cmake --preset linux-x86_64-release-dispatch
@@ -435,8 +435,8 @@ path.
 
 ## Arrow Evaluation
 
-Use Arrow when upstream data is already typed or when JSON parsing is not what
-you want to measure.
+Arrow is the appropriate path when upstream data is already typed or when a
+benchmark must exclude JSON parsing.
 
 ```python
 import pyarrow as pa
@@ -710,15 +710,15 @@ error_samples
 ### Output detail: `COUNTS`, `CODES`, `DECISIONS`, and `BITMASKS`
 
 `EngineConfig.output_detail` decides how much per-record detail is materialized.
-**The build default is `OutputDetail.BITMASKS`.** Use the cheapest level that
-your caller needs:
+**The build default is `OutputDetail.BITMASKS`.** Select the least expensive
+level required by the caller:
 
 | Detail | Materialized outputs |
 | --- | --- |
 | `COUNTS` | `n_records`, `n_matched`, `match_counts`, ingest counters, timing. No row-level decisions. |
 | `CODES` | `COUNTS` plus compact integer `decision_codes` and `decision_label_map`. |
 | `DECISIONS` | Per-record decision strings, scores, risk bands, winning rules, grouped routing indices, and model outputs. |
-| `BITMASKS` | `DECISIONS` plus one per-rule, per-record match mask, so you can ask *which* rules fired on *which* records. |
+| `BITMASKS` | `DECISIONS` plus one per-rule, per-record match mask for rule-level attribution. |
 
 ```python
 config = blazerules.EngineConfig()
@@ -752,9 +752,9 @@ result.indices_for_rule("velocity_rule")
 ```
 
 Set `OutputDetail.COUNTS` for ingest/evaluate benchmarks, `CODES` for compact
-high-throughput routing, `DECISIONS` when you need normal row-level outputs, and
-`BITMASKS` when you need per-rule attribution. See
-[Decisions &amp; Scoring](https://blazerules.readme.io/docs/decisions-and-scoring)
+high-throughput routing, `DECISIONS` for row-level outputs, and `BITMASKS` for
+per-rule attribution. See
+[Decisions &amp; Scoring](https://docs.blazerules.dev/docs/decisions-and-scoring)
 for the full breakdown.
 
 ## Windows
@@ -822,8 +822,8 @@ server CPUs reduce frequency under wide vectors. Measure before enabling.
 
 ## IO Module
 
-The full wheel and default source build include `blazerules_io`. If you maintain
-a custom lean build, keep `-DBLAZERULES_IO=ON` and enable the matching decoder
+The full wheel and default source build include `blazerules_io`. Custom lean
+builds require `-DBLAZERULES_IO=ON` and the matching decoder
 flags:
 
 ```text
@@ -902,8 +902,8 @@ Agent:
 cmake --build cmake-build-release --target blazerules_agent -j
 ```
 
-The dashboard is read-only and unauthenticated. Bind to localhost unless you add
-your own network controls.
+The dashboard is read-only and unauthenticated. Bind it to localhost unless
+external network controls protect the listener.
 
 If the agent returns HTTP 500 on `/v1/logs` (a bad ruleset, a missing lookup
 file, a schema mismatch), it also logs `instance '<name>': evaluation error:

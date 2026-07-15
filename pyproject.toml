@@ -41,7 +41,7 @@ dependencies = [
 
 [project.urls]
 Homepage = "https://blazerules.dev"
-Documentation = "https://blazerules.readme.io/docs/getting-started"
+Documentation = "https://docs.blazerules.dev/docs/getting-started"
 Repository = "https://github.com/purijs/blazerules"
 Issues = "https://github.com/purijs/blazerules/issues"
 
