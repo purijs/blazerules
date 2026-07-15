@@ -1,9 +1,6 @@
 # BlazeRules
 
 [![Docs](https://img.shields.io/badge/docs-docs.blazerules.dev-2563eb)](https://docs.blazerules.dev/docs/getting-started)
-[![GitHub](https://img.shields.io/badge/github-purijs%2Fblazerules-111827?logo=github)](https://github.com/purijs/blazerules)
-![C++20](https://img.shields.io/badge/C%2B%2B-20-00599C?logo=cplusplus)
-![Python](https://img.shields.io/badge/python-pybind11-3776AB?logo=python)
 [![Build and publish Python wheels](https://github.com/purijs/blazerules/actions/workflows/workflow.yml/badge.svg)](https://github.com/purijs/blazerules/actions/workflows/workflow.yml)
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
